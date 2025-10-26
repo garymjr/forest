@@ -77,8 +77,8 @@ fi
 if command -v jq &> /dev/null; then
   DOWNLOAD_URL=$(echo "$LATEST_RELEASE" | jq -r ".assets[] | select(.name | contains(\"$BINARY_NAME\")) | .browser_download_url" | head -1)
 else
-  # Safer fallback: escape special regex characters and use simpler pattern
-  ESCAPED_BINARY_NAME=$(printf '%s\n' "$BINARY_NAME" | sed 's/[[\.*^$/]/\\&/g')
+  # Safer fallback: escape special regex characters comprehensively
+  ESCAPED_BINARY_NAME=$(printf '%s\n' "$BINARY_NAME" | sed 's/[[\.*^$\/]/\\&/g')
   DOWNLOAD_URL=$(echo "$LATEST_RELEASE" | sed -n "s/.*\"browser_download_url\": \"\([^\"]*$ESCAPED_BINARY_NAME[^\"]*\)\".*/\1/p" | head -1)
 fi
 

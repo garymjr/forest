@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 interface Worktree {
   path: string;
@@ -22,6 +22,32 @@ interface ParsedArgs {
   flags: Record<string, boolean | string>;
 }
 
+function validatePath(path: string): { valid: boolean; error?: string } {
+  if (!path || path.trim().length === 0) {
+    return { valid: false, error: "Path cannot be empty" };
+  }
+  if (path.length > 4096) {
+    return { valid: false, error: "Path exceeds maximum length (4096 chars)" };
+  }
+  if (path.includes("\0")) {
+    return { valid: false, error: "Path contains null bytes" };
+  }
+  return { valid: true };
+}
+
+function validateBranch(branch: string): { valid: boolean; error?: string } {
+  if (!branch || branch.trim().length === 0) {
+    return { valid: false, error: "Branch name cannot be empty" };
+  }
+  if (branch.length > 256) {
+    return { valid: false, error: "Branch name exceeds maximum length (256 chars)" };
+  }
+  if (branch.includes("\0") || branch.includes("\n")) {
+    return { valid: false, error: "Branch contains invalid characters" };
+  }
+  return { valid: true };
+}
+
 function parseArgs(): ParsedArgs {
   const args = process.argv.slice(2);
   const flags: Record<string, boolean | string> = {};
@@ -29,6 +55,8 @@ function parseArgs(): ParsedArgs {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (!arg) continue;
+    
     if (arg.startsWith("--")) {
       const key = arg.slice(2);
       const eqIndex = key.indexOf("=");
@@ -58,35 +86,56 @@ async function getWorktrees(): Promise<Worktree[]> {
     const lines = output.trim().split("\n").filter(Boolean);
 
     const worktrees: Worktree[] = [];
+    let i = 0;
 
-    for (const line of lines) {
-      if (!line.startsWith("worktree")) continue;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line || !line.startsWith("worktree")) {
+        i++;
+        continue;
+      }
 
-      const parts = line.split("\t");
-      const path = parts[0].replace(/^worktree\s+/, "");
-      const detailsRaw = parts.slice(1).join("\t");
+      const parts = line.split(/\s+/);
+      const path = parts[1] || "";
 
       let branch = "";
       let commit = "";
       let locked = false;
       let prunable = false;
 
-      const details = detailsRaw.split(/\s+/);
-      for (const detail of details) {
-        if (detail.startsWith("branch")) {
-          branch = detail.replace("branch", "").replace(/^.*\//, "");
-        } else if (detail.startsWith("detached")) {
+      // Parse remaining parts of worktree line
+      for (let j = 2; j < parts.length; j++) {
+        const part = parts[j];
+        if (!part) continue;
+        
+        if (part.startsWith("branch")) {
+          const branchRef = part.replace(/^branch\s/, "");
+          branch = branchRef.replace(/^.*\//, "");
+        } else if (part === "detached") {
           branch = "detached";
-        } else if (detail === "locked") {
+        } else if (part === "locked") {
           locked = true;
-        } else if (detail === "prunable") {
+        } else if (part === "prunable") {
           prunable = true;
-        } else if (/^[a-f0-9]{7,}/.test(detail)) {
-          commit = detail.slice(0, 7);
+        } else if (/^[a-f0-9]{7,}$/.test(part)) {
+          commit = part.slice(0, 7);
+        }
+      }
+
+      // Look for commit on next line if not found on worktree line
+      if (!commit && i + 1 < lines.length) {
+        const nextLine = lines[i + 1];
+        if (nextLine && nextLine.startsWith("detached")) {
+          const match = nextLine.match(/([a-f0-9]{7,})/);
+          if (match?.[1]) {
+            commit = match[1].slice(0, 7);
+          }
+          i++;
         }
       }
 
       worktrees.push({ path, branch, commit, locked, prunable });
+      i++;
     }
 
     return worktrees;
@@ -150,8 +199,32 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
     };
   }
 
+  const pathValidation = validatePath(path);
+  if (!pathValidation.valid) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_PATH",
+        message: pathValidation.error || "Invalid path",
+        suggestion: "Check that the path is valid and safe",
+      },
+    };
+  }
+
+  const branchValidation = validateBranch(branch);
+  if (!branchValidation.valid) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_BRANCH",
+        message: branchValidation.error || "Invalid branch name",
+        suggestion: "Check that the branch name is valid",
+      },
+    };
+  }
+
   try {
-    await Bun.$`git worktree add ${path} ${branch}`.quiet();
+    await Bun.$`git worktree add ${[path]} ${[branch]}`.quiet();
 
     const result = {
       success: true,
@@ -189,8 +262,20 @@ async function cmdRemove(args: string[], flags: Record<string, boolean | string>
     };
   }
 
+  const pathValidation = validatePath(path);
+  if (!pathValidation.valid) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_PATH",
+        message: pathValidation.error || "Invalid path",
+        suggestion: "Check that the path is valid and safe",
+      },
+    };
+  }
+
   try {
-    await Bun.$`git worktree remove ${path}`.quiet();
+    await Bun.$`git worktree remove ${[path]}`.quiet();
 
     const result = {
       success: true,
