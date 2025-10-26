@@ -91,8 +91,14 @@ frm() {
   fi
 }
 
+# fsync - Sync all worktrees with upstream
+fsync() {
+  forest sync "$@"
+}
+
 # Export functions (for subshells)
 export -f fcd
 export -f fadd
 export -f fls
 export -f frm
+export -f fsync

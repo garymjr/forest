@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 interface Worktree {
   path: string;
@@ -208,7 +208,7 @@ function parseArgs(): ParsedArgs {
   const positionalArgs: string[] = [];
   
   // Flags that accept space-separated values
-  const valueFlags = new Set(["shell", "reason"]);
+  const valueFlags = new Set(["shell", "reason", "from"]);
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -226,7 +226,12 @@ function parseArgs(): ParsedArgs {
       }
     } else if (arg.startsWith("-")) {
       const key = arg.slice(1);
-      flags[key] = true;
+      // Handle -b as alias for new-branch
+      if (key === "b") {
+        flags["new-branch"] = true;
+      } else {
+        flags[key] = true;
+      }
     } else {
       positionalArgs.push(arg);
     }
@@ -414,6 +419,8 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
   // Determine if first arg is a path or branch name
   let path: string;
   let branch: string;
+  const newBranch = flags["new-branch"];
+  const branchFrom = (flags.from as string) || "";
 
   if (!first) {
     return {
@@ -421,7 +428,7 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
       error: {
         code: "INVALID_ARGS",
         message: "Missing required arguments",
-        suggestion: "Usage: forest add <branch> [--path <path>] or forest add <path> <branch>",
+        suggestion: "Usage: forest add <branch> [-b|--new-branch] [--from <base-branch>] or forest add <path> <branch>",
       },
     };
   }
@@ -482,15 +489,21 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
       await Bun.$`mkdir -p ${[parentDir]}`.quiet();
     }
 
-    await Bun.$`git worktree add ${[path]} ${[branch]}`.quiet();
+    // If creating a new branch
+    if (newBranch) {
+      const baseRef = branchFrom || "HEAD";
+      await Bun.$`git worktree add -b ${[branch]} ${[path]} ${[baseRef]}`.quiet();
+    } else {
+      await Bun.$`git worktree add ${[path]} ${[branch]}`.quiet();
+    }
 
     const result = {
       success: true,
-      data: { message: `Worktree created: ${path} → ${branch}`, path, branch },
+      data: { message: `Worktree created: ${path} → ${branch}`, path, branch, new_branch: !!newBranch },
     };
 
     if (!flags.json) {
-      console.log(`✓ Worktree created: ${path} → ${branch}`);
+      console.log(`✓ Worktree created: ${path} → ${branch}${newBranch ? " (new branch)" : ""}`);
     }
 
     return result;
@@ -500,7 +513,7 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
       error: {
         code: "ADD_ERROR",
         message: `Failed to create worktree at ${path}`,
-        suggestion: "Check that the path is valid and the branch exists",
+        suggestion: `Check that the path is valid and the branch exists${newBranch ? ", or use --from to specify a base branch" : ""}`,
       },
     };
   }
@@ -590,6 +603,122 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
       error: {
         code: "PRUNE_ERROR",
         message: "Failed to prune worktrees",
+        suggestion: "Ensure you are in a git repository",
+      },
+    };
+  }
+}
+
+async function cmdSync(flags: Record<string, boolean | string>): Promise<CommandResult> {
+  try {
+    const worktrees = await getWorktrees();
+    const force = flags.force;
+    const all = flags.all;
+    
+    const results = {
+      synced: [] as string[],
+      skipped: [] as { path: string; reason: string }[],
+      failed: [] as { path: string; error: string }[],
+    };
+
+    for (const wt of worktrees) {
+      try {
+        // Get status of the worktree
+        const status = await getWorktreeStatus(wt);
+
+        // Check if worktree is clean or force is enabled
+        if (status.dirty && !force) {
+          results.skipped.push({
+            path: wt.path,
+            reason: `has uncommitted changes (${status.stagedFiles + status.unstagedFiles} files)`,
+          });
+          continue;
+        }
+
+        // Check if it has upstream
+        if (!status.hasUpstream) {
+          results.skipped.push({
+            path: wt.path,
+            reason: "no upstream configured",
+          });
+          continue;
+        }
+
+        // If dirty and force, stash changes first
+        if (status.dirty && force) {
+          try {
+            await Bun.$`git -C ${[wt.path]} stash`.quiet();
+          } catch (error) {
+            results.failed.push({
+              path: wt.path,
+              error: "failed to stash changes",
+            });
+            continue;
+          }
+        }
+
+        // Pull the changes
+        try {
+          await Bun.$`git -C ${[wt.path]} pull`.quiet();
+          results.synced.push(wt.path);
+        } catch (error) {
+          results.failed.push({
+            path: wt.path,
+            error: "pull failed",
+          });
+        }
+      } catch (error) {
+        results.failed.push({
+          path: wt.path,
+          error: "unexpected error",
+        });
+      }
+    }
+
+    const response = {
+      success: results.failed.length === 0,
+      data: { results, summary: {
+        total: worktrees.length,
+        synced: results.synced.length,
+        skipped: results.skipped.length,
+        failed: results.failed.length,
+      }},
+    };
+
+    if (!flags.json) {
+      console.log("Git Worktrees Sync:");
+      console.log("─".repeat(80));
+      
+      if (results.synced.length > 0) {
+        console.log(`✓ Synced ${results.synced.length} worktree(s):`);
+        results.synced.forEach((p) => console.log(`  - ${p}`));
+      }
+
+      if (results.skipped.length > 0) {
+        console.log(`⊘ Skipped ${results.skipped.length} worktree(s):`);
+        results.skipped.forEach((item) => console.log(`  - ${item.path} (${item.reason})`));
+      }
+
+      if (results.failed.length > 0) {
+        console.log(`✗ Failed ${results.failed.length} worktree(s):`);
+        results.failed.forEach((item) => console.log(`  - ${item.path} (${item.error})`));
+      }
+
+      if (results.synced.length === 0 && results.failed.length === 0) {
+        console.log("No worktrees to sync.");
+      }
+      
+      console.log("─".repeat(80));
+      console.log(`Summary: ${results.synced.length} synced, ${results.skipped.length} skipped, ${results.failed.length} failed`);
+    }
+
+    return response;
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: "SYNC_ERROR",
+        message: "Failed to sync worktrees",
         suggestion: "Ensure you are in a git repository",
       },
     };
@@ -1079,7 +1208,8 @@ async function cmdSetup(flags: Record<string, boolean | string>): Promise<Comman
       console.log("  fcd <branch>       - Change to worktree directory");
       console.log("  fadd <branch>      - Create worktree and cd into it");
       console.log("  fls                - List all worktrees");
-      console.log("  frm                - Remove current worktree and return to main repo\n");
+      console.log("  frm                - Remove current worktree and return to main repo");
+      console.log("  fsync              - Sync all worktrees with upstream\n");
 
       console.log(`To enable these, add to your ${profileHint}:\n`);
       console.log(`  source ${functionsPath}\n`);
@@ -1117,6 +1247,7 @@ Commands:
   add <branch>      Create a new worktree (or add <path> <branch> for explicit path)
   remove <branch>   Remove a worktree (or remove <path> for explicit path)
   prune             Prune stale worktrees
+  sync              Pull updates across all worktrees
   info <path>       Show worktree details
   status            Show comprehensive status of all worktrees
   path <branch>     Get path to worktree (useful in scripts)
@@ -1136,10 +1267,14 @@ Options:
 
 Examples:
   forest add feature-x              # Creates at ~/.forest/worktrees/repo/feature-x/
-  forest add feature-x main         # Create worktree on 'main' branch
+  forest add feature-x -b           # Create new branch and worktree
+  forest add feature-x -b --from main  # Create branch from 'main'
+  forest add feature-x main         # Create worktree on existing 'main' branch
   forest add ./custom/path feature  # Create at explicit path
   forest remove feature-x
   forest status                     # Show status of all worktrees
+  forest sync                       # Pull updates on all clean worktrees
+  forest sync --force               # Pull even if worktrees have changes (stashes first)
   forest path feature-x              # Get path for shell integration
   cd $(forest path feature-x)
   forest config set directory ~/.my-worktrees
@@ -1161,19 +1296,25 @@ Options:
 
 JSON output includes array of worktrees with path, branch, commit, locked, prunable.`,
 
-      add: `forest add <branch> [<branch-name>] [--json]
+      add: `forest add <branch> [-b|--new-branch] [--from <base-branch>] [--json]
 
 Create a new worktree in the central directory or at an explicit path.
 
 Arguments:
   <branch>          Branch name (auto-generates path in central directory)
-  <branch-name>     Optional: different branch name to checkout
+
+Options:
+  -b, --new-branch  Create a new branch instead of checking out existing
+  --from <branch>   Base branch for new branch (defaults to HEAD)
+  --json            Output as JSON
 
 Legacy usage: forest add <path> <branch>
   If first argument contains "/" or is an existing path, treats as explicit path.
 
-Options:
-  --json    Output as JSON`,
+Examples:
+  forest add feature-x                    # Checkout existing branch
+  forest add feature-x -b                 # Create new branch from HEAD
+  forest add feature-x -b --from main     # Create new branch from main`,
 
       remove: `forest remove <branch|path> [--json]
 
@@ -1192,6 +1333,24 @@ Remove worktree information for deleted directories.
 Options:
   --dry-run    Show what would be pruned without pruning
   --json       Output as JSON`,
+
+      sync: `forest sync [--force] [--json]
+
+Pull updates from upstream on all worktrees.
+
+Status indicators:
+  ✓ Synced   - Successfully pulled updates
+  ⊘ Skipped  - Worktree not synced (dirty or no upstream)
+  ✗ Failed   - Sync failed with error
+
+Options:
+  --force    Pull even if worktree has uncommitted changes (stashes first)
+  --json     Output as JSON
+
+Examples:
+  forest sync              # Sync clean worktrees only
+  forest sync --force      # Sync all worktrees, stashing changes if needed
+  forest sync --json       # Get structured JSON output`,
 
       info: `forest info <path> [--json]
 
@@ -1297,6 +1456,7 @@ Shell helper functions available:
   fadd <branch>      - Create worktree and cd into it
   fls                - List all worktrees
   frm                - Remove current worktree and return to main repo
+  fsync [--force]    - Sync all worktrees with upstream
 
 Options:
   --shell <shell>    Target shell (bash, zsh, fish, all; default: detect current)
@@ -1342,6 +1502,9 @@ async function main(): Promise<void> {
         break;
       case "prune":
         result = await cmdPrune(parsed.flags);
+        break;
+      case "sync":
+        result = await cmdSync(parsed.flags);
         break;
       case "info":
         result = await cmdInfo(parsed.args, parsed.flags);
