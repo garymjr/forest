@@ -104,7 +104,7 @@ export async function getWorktreePath(repoPath: string, branchName: string): Pro
   return null;
 }
 
-export async function parseJSONOutput(output: string): Promise<any> {
+export function parseJSONOutput(output: string): any {
   try {
     return JSON.parse(output);
   } catch (error) {

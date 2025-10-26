@@ -7,13 +7,13 @@ function getColors() {
   const noColor = Bun.env.NO_COLOR || process.argv.includes("--no-color");
   if (noColor) {
     return {
-      green: "",
-      red: "",
-      yellow: "",
-      cyan: "",
-      gray: "",
-      dim: "",
-      reset: "",
+      green: (text: string) => text,
+      red: (text: string) => text,
+      yellow: (text: string) => text,
+      cyan: (text: string) => text,
+      gray: (text: string) => text,
+      dim: (text: string) => text,
+      reset: (text: string) => text,
       success: (text: string) => text,
       error: (text: string) => text,
       warning: (text: string) => text,
@@ -21,13 +21,13 @@ function getColors() {
     };
   }
   return {
-    green: "\x1b[32m",
-    red: "\x1b[31m",
-    yellow: "\x1b[33m",
-    cyan: "\x1b[36m",
-    gray: "\x1b[90m",
-    dim: "\x1b[2m",
-    reset: "\x1b[0m",
+    green: (text: string) => `\x1b[32m${text}\x1b[0m`,
+    red: (text: string) => `\x1b[31m${text}\x1b[0m`,
+    yellow: (text: string) => `\x1b[33m${text}\x1b[0m`,
+    cyan: (text: string) => `\x1b[36m${text}\x1b[0m`,
+    gray: (text: string) => `\x1b[90m${text}\x1b[0m`,
+    dim: (text: string) => `\x1b[2m${text}\x1b[0m`,
+    reset: (text: string) => `\x1b[0m${text}\x1b[0m`,
     success: (text: string) => `\x1b[32m${text}\x1b[0m`,
     error: (text: string) => `\x1b[31m${text}\x1b[0m`,
     warning: (text: string) => `\x1b[33m${text}\x1b[0m`,
@@ -363,14 +363,22 @@ function parseArgs(): ParsedArgs {
 async function getWorktrees(): Promise<Worktree[]> {
   try {
     const output = await Bun.$`git worktree list --porcelain`.quiet().text();
-    const lines = output.trim().split("\n").filter(Boolean);
+    const lines = output.trim().split("\n");
 
     const worktrees: Worktree[] = [];
     let i = 0;
 
     while (i < lines.length) {
       const line = lines[i];
-      if (!line || !line.startsWith("worktree")) {
+      
+      // Skip empty lines
+      if (!line || line.trim().length === 0) {
+        i++;
+        continue;
+      }
+      
+      // Look for worktree entry
+      if (!line.startsWith("worktree")) {
         i++;
         continue;
       }
@@ -383,39 +391,66 @@ async function getWorktrees(): Promise<Worktree[]> {
       let locked = false;
       let prunable = false;
 
-      // Parse remaining parts of worktree line
+      // Parse attributes on the worktree line itself
       for (let j = 2; j < parts.length; j++) {
         const part = parts[j];
         if (!part) continue;
         
-        if (part.startsWith("branch")) {
-          const branchRef = part.replace(/^branch\s/, "");
-          branch = branchRef.replace(/^.*\//, "");
-        } else if (part === "detached") {
-          branch = "detached";
-        } else if (part === "locked") {
+        if (part === "locked") {
           locked = true;
         } else if (part === "prunable") {
           prunable = true;
-        } else if (/^[a-f0-9]{7,}$/.test(part)) {
-          commit = part.slice(0, 7);
+        } else if (part === "detached") {
+          branch = "detached";
         }
       }
 
-      // Look for commit on next line if not found on worktree line
-      if (!commit && i + 1 < lines.length) {
-        const nextLine = lines[i + 1];
-        if (nextLine && nextLine.startsWith("detached")) {
-          const match = nextLine.match(/([a-f0-9]{7,})/);
-          if (match?.[1]) {
-            commit = match[1].slice(0, 7);
-          }
-          i++;
+      // Read subsequent lines for this worktree entry
+      i++;
+      while (i < lines.length) {
+        const nextLine = lines[i];
+        
+        // Stop at empty line or next worktree entry
+        if (!nextLine || nextLine.trim().length === 0 || nextLine.startsWith("worktree")) {
+          break;
         }
+
+        // Parse HEAD line
+        if (nextLine.startsWith("HEAD ")) {
+          const hashMatch = nextLine.match(/([a-f0-9]{7,})/);
+          if (hashMatch?.[1]) {
+            commit = hashMatch[1].slice(0, 7);
+          }
+        }
+        
+        // Parse branch line
+        if (nextLine.startsWith("branch ")) {
+          const branchRef = nextLine.slice(7); // Remove "branch " prefix
+          branch = branchRef.replace(/^.*\//, ""); // Extract branch name from ref
+        }
+        
+        // Parse detached line
+        if (nextLine.startsWith("detached")) {
+          branch = "detached";
+          // Extract commit if present on detached line
+          const hashMatch = nextLine.match(/([a-f0-9]{7,})/);
+          if (hashMatch?.[1] && !commit) {
+            commit = hashMatch[1].slice(0, 7);
+          }
+        }
+        
+        // Parse locked/prunable attributes that may appear on separate lines
+        if (nextLine === "locked") {
+          locked = true;
+        }
+        if (nextLine === "prunable") {
+          prunable = true;
+        }
+
+        i++;
       }
 
       worktrees.push({ path, branch, commit, locked, prunable });
-      i++;
     }
 
     return worktrees;
