@@ -116,7 +116,7 @@ export async function runForestCommand(
   args: string[],
   options: { cwd?: string; json?: boolean } = {}
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const forestPath = `${import.meta.dir}/index.ts`;
+  const forestPath = `${import.meta.dir}/../index.ts`;
   const cmd = ["bun", forestPath, ...args];
   if (options.json) {
     cmd.push("--json");

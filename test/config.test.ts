@@ -24,13 +24,13 @@ afterEach(() => {
 
 test("config - get default directory", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config get directory`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get directory`.cwd(testRepo.path).text();
   expect(result).toContain(".forest/worktrees");
 });
 
 test("config - set custom directory", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config set directory ~/.custom-forest --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ~/.custom-forest --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   expect(data.data.value).toContain(".custom-forest");
@@ -39,10 +39,10 @@ test("config - set custom directory", async () => {
 test("config - get returns set value", async () => {
   // Set a value first
   const forestDir = import.meta.dir;
-  await Bun.$`bun ${[`${forestDir}/index.ts`]} config set directory ~/.my-worktrees-test`.cwd(testRepo.path).text();
+  await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ~/.my-worktrees-test`.cwd(testRepo.path).text();
   
   // Get the value back
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config get directory --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get directory --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   expect(data.data.value).toContain(".my-worktrees-test");
@@ -51,40 +51,40 @@ test("config - get returns set value", async () => {
 test("config - reset to defaults", async () => {
   // Set a custom value
   const forestDir = import.meta.dir;
-  await Bun.$`bun ${[`${forestDir}/index.ts`]} config set directory ~/.custom-forest`.cwd(testRepo.path).text();
+  await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ~/.custom-forest`.cwd(testRepo.path).text();
   
   // Reset to defaults
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config reset --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config reset --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   
   // Verify default is back
-  const getResult = await Bun.$`bun ${[`${forestDir}/index.ts`]} config get directory --json`.cwd(testRepo.path).text();
+  const getResult = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get directory --json`.cwd(testRepo.path).text();
   const getData = parseJSONOutput(getResult);
   expect(getData.data.value).toContain(".forest/worktrees");
 });
 
 test("config - reject unknown config key", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config get unknown-key`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get unknown-key`.cwd(testRepo.path).text();
   expect(result).toContain("Unknown") || expect(result).toContain("error");
 });
 
 test("config - set requires value", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config set directory`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory`.cwd(testRepo.path).text();
   expect(result).toContain("required") || expect(result).toContain("error");
 });
 
 test("config - reject invalid set action", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config invalid directory value`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config invalid directory value`.cwd(testRepo.path).text();
   expect(result).toContain("Unknown") || expect(result).toContain("Invalid");
 });
 
 test("config - JSON output includes key and value", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config get directory --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get directory --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   expect(data.data.key).toBe("directory");
@@ -93,7 +93,7 @@ test("config - JSON output includes key and value", async () => {
 
 test("config - supports tilde expansion", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config set directory ~/forest-test --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ~/forest-test --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   expect(data.data.value).toContain("forest-test");
@@ -102,17 +102,17 @@ test("config - supports tilde expansion", async () => {
 
 test("config - empty path rejected", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config set directory ""`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ""`.cwd(testRepo.path).text();
   expect(result).toContain("error") || expect(result).toContain("cannot be empty");
 });
 
 test("config - validate on load from disk", async () => {
   // Set a value
   const forestDir = import.meta.dir;
-  await Bun.$`bun ${[`${forestDir}/index.ts`]} config set directory ~/.valid-forest --json`.cwd(testRepo.path).text();
+  await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ~/.valid-forest --json`.cwd(testRepo.path).text();
   
   // Verify it persists by getting it again
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} config get directory --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get directory --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   expect(data.data.value).toContain(".valid-forest");

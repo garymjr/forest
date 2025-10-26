@@ -31,13 +31,13 @@ test("groups - list all namespace groups", async () => {
   await Bun.$`git -C ${[testRepo.path]} worktree add -b bugfix/login ${[wtDir3]}`.quiet().catch(() => {});
   
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} groups`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} groups`.cwd(testRepo.path).text();
   expect(result).toContain("Git Worktree Groups");
 });
 
 test("groups - JSON output includes group array", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} groups --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} groups --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   expect(Array.isArray(data.data.groups)).toBe(true);
@@ -56,7 +56,7 @@ test("groups - count worktrees per group", async () => {
   await Bun.$`git -C ${[testRepo.path]} worktree add ${[wtDir2]} feature/ui`.quiet().catch(() => {});
   
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} groups --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} groups --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   if (data.data.groups.length > 0) {
     const group = data.data.groups[0];
@@ -67,7 +67,7 @@ test("groups - count worktrees per group", async () => {
 
 test("groups --verbose shows worktrees in each group", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} groups --verbose`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} groups --verbose`.cwd(testRepo.path).text();
   expect(result).toContain("Git Worktree Groups") || expect(result).length > 0;
 });
 
@@ -83,7 +83,7 @@ test("list --group filters by namespace", async () => {
   await Bun.$`git -C ${[testRepo.path]} worktree add ${[wtDir2]} bugfix/login`.quiet().catch(() => {});
   
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} list --group feature --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} list --group feature --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   if (data.data.worktrees.length > 0) {
@@ -95,7 +95,7 @@ test("list --group filters by namespace", async () => {
 
 test("status --group filters by namespace", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} status --group feature --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} status --group feature --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
   expect(Array.isArray(data.data.worktrees)).toBe(true);
@@ -103,7 +103,7 @@ test("status --group filters by namespace", async () => {
 
 test("sync --group syncs only namespace worktrees", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} sync --group feature --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} sync --group feature --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.data.results).toBeDefined();
   expect(data.data.summary).toBeDefined();
@@ -111,7 +111,7 @@ test("sync --group syncs only namespace worktrees", async () => {
 
 test("add --group places worktree in namespace", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} add feature-test -b --group feature --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} add feature-test -b --group feature --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
 });
@@ -123,7 +123,7 @@ test("groups - (root) group contains non-namespaced worktrees", async () => {
   await Bun.$`git -C ${[testRepo.path]} worktree add ${[wtDir]} root-branch`.quiet().catch(() => {});
   
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/index.ts`]} groups --json`.cwd(testRepo.path).text();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} groups --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   const rootGroup = data.data.groups.find((g: any) => g.name === "(root)");
   if (rootGroup) {
