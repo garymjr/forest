@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 
 // Color utilities with NO_COLOR support
 function getColors() {
@@ -631,6 +631,114 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
         code: "ADD_ERROR",
         message: `Failed to create worktree at ${path}`,
         suggestion: `Check that the path is valid and the branch exists${newBranch ? ", or use --from to specify a base branch" : ""}`,
+      },
+    };
+  }
+}
+
+async function cmdClone(args: string[], flags: Record<string, boolean | string>): Promise<CommandResult> {
+  let [source, newBranch] = args;
+
+  if (!source || !newBranch) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_ARGS",
+        message: "Missing required arguments",
+        suggestion: "Usage: forest clone <source-branch|path> <new-branch> [-b|--new-branch]",
+      },
+    };
+  }
+
+  const newBranchFlag = flags["new-branch"];
+  const targetPath = newBranch.includes("/") ? newBranch : await getWorktreePath(newBranch);
+
+  const pathValidation = validatePath(targetPath);
+  if (!pathValidation.valid) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_PATH",
+        message: pathValidation.error || "Invalid path",
+        suggestion: "Check that the path is valid and safe",
+      },
+    };
+  }
+
+  const branchValidation = validateBranch(newBranch);
+  if (!branchValidation.valid) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_BRANCH",
+        message: branchValidation.error || "Invalid branch name",
+        suggestion: "Check that the branch name is valid",
+      },
+    };
+  }
+
+  try {
+    const colors = getColors();
+    const sourcePath = await resolveWorktreePath(source);
+    
+    spinner.start(`Cloning worktree from ${sourcePath}...`);
+
+    // Get the current commit of the source worktree
+    const sourceCommit = await Bun.$`git -C ${[sourcePath]} rev-parse HEAD`.quiet().text();
+    if (!sourceCommit.trim()) {
+      spinner.stop();
+      return {
+        success: false,
+        error: {
+          code: "CLONE_ERROR",
+          message: `Failed to get commit from source worktree at ${sourcePath}`,
+          suggestion: "Check that the source worktree exists and is a valid git repository",
+        },
+      };
+    }
+
+    // Ensure parent directory exists
+    const parentDir = targetPath.split("/").slice(0, -1).join("/");
+    if (parentDir) {
+      await Bun.$`mkdir -p ${[parentDir]}`.quiet();
+    }
+
+    // Create worktree at the source commit
+    if (newBranchFlag) {
+      // Create new branch from source commit
+      const cleanBranch = newBranch.includes("/") ? newBranch.split("/").pop() || "branch" : newBranch;
+      await Bun.$`git worktree add -b ${[cleanBranch]} ${[targetPath]} ${[sourceCommit.trim()]}`.quiet();
+    } else {
+      // Create detached HEAD at source commit
+      await Bun.$`git worktree add ${[targetPath]} ${[sourceCommit.trim()]}`.quiet();
+    }
+
+    spinner.stop();
+
+    const result = {
+      success: true,
+      data: { 
+        message: `Worktree cloned: ${targetPath} → ${sourceCommit.trim().slice(0, 7)}${newBranchFlag ? ` (new branch: ${newBranch})` : " (detached)"}`, 
+        path: targetPath, 
+        branch: newBranchFlag ? newBranch : "detached",
+        source_commit: sourceCommit.trim().slice(0, 7),
+        source_path: sourcePath,
+      },
+    };
+
+    if (!flags.json) {
+      console.log(colors.success(`✓ Worktree cloned: ${targetPath}${newBranchFlag ? ` → ${newBranch} (from ${sourceCommit.trim().slice(0, 7)})` : ` (detached at ${sourceCommit.trim().slice(0, 7)})`}`));
+    }
+
+    return result;
+  } catch (error) {
+    spinner.stop();
+    return {
+      success: false,
+      error: {
+        code: "CLONE_ERROR",
+        message: `Failed to clone worktree from ${source}`,
+        suggestion: "Check that the source worktree exists and the destination path is valid",
       },
     };
   }
@@ -1415,6 +1523,7 @@ Usage: forest <command> [options]
 Commands:
   list              List all worktrees
   add <branch>      Create a new worktree (or add <path> <branch> for explicit path)
+  clone <src> <dst> Create a worktree from another worktree's current commit state
   remove <branch>   Remove a worktree (or remove <path> for explicit path)
   prune             Prune stale worktrees
   sync              Pull updates across all worktrees
@@ -1441,6 +1550,7 @@ Examples:
   forest add feature-x -b --from main  # Create branch from 'main'
   forest add feature-x main         # Create worktree on existing 'main' branch
   forest add ./custom/path feature  # Create at explicit path
+  forest clone feature-x feature-y -b  # Clone feature-x's commit to new branch feature-y
   forest remove feature-x
   forest status                     # Show status of all worktrees
   forest sync                       # Pull updates on all clean worktrees
@@ -1485,6 +1595,23 @@ Examples:
   forest add feature-x                    # Checkout existing branch
   forest add feature-x -b                 # Create new branch from HEAD
   forest add feature-x -b --from main     # Create new branch from main`,
+
+      clone: `forest clone <source-branch|path> <new-branch> [-b|--new-branch] [--json]
+
+Create a new worktree from another worktree's current commit state.
+
+Arguments:
+  <source-branch|path>  Source branch name or path to the worktree to clone from
+  <new-branch>          New branch name or path for the new worktree
+
+Options:
+  -b, --new-branch      Create a new branch at the source commit (default: detached HEAD)
+  --json                Output as JSON
+
+Examples:
+  forest clone feature-x feature-y          # Clone feature-x's commit to detached HEAD
+  forest clone feature-x feature-y -b       # Clone feature-x's commit as new branch
+  forest clone feature-x ./custom/path -b   # Clone to explicit path with new branch`,
 
       remove: `forest remove <branch|path> [--force] [--json]
 
@@ -1671,6 +1798,9 @@ async function main(): Promise<void> {
         break;
       case "add":
         result = await cmdAdd(parsed.args, parsed.flags);
+        break;
+      case "clone":
+        result = await cmdClone(parsed.args, parsed.flags);
         break;
       case "remove":
         result = await cmdRemove(parsed.args, parsed.flags);
