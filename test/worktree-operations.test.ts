@@ -5,7 +5,8 @@ import {
   assertWorktreeExists,
   getWorktreePath,
   parseJSONOutput,
-  TestRepo,
+  resetForestConfig,
+  type TestRepo,
 } from "./test-utils";
 
 let testRepo: TestRepo;
@@ -14,8 +15,9 @@ beforeEach(async () => {
   testRepo = await createTempTestRepo("forest-wt-ops");
 });
 
-afterEach(() => {
+afterEach(async () => {
   testRepo.cleanup();
+  await resetForestConfig();
 });
 
 test("add - create worktree with -b flag", async () => {
@@ -53,8 +55,9 @@ test("add - create with explicit path and branch", async () => {
 });
 
 test("add - reject empty branch name", async () => {
-  const result = await Bun.$`bun ./index.ts add "".catch((e) => e)`.cwd(testRepo.path).text();
-  expect(result).toContain("error") || expect(result).toContain("Missing");
+  const forestDir = import.meta.dir;
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} add ""`.cwd(testRepo.path).catch((e) => e);
+  expect(result.exitCode !== 0 || result.stdout.includes("error") || result.stdout.includes("Missing")).toBe(true);
 });
 
 test("add - JSON output includes metadata", async () => {
@@ -79,7 +82,7 @@ test("remove - reject dirty worktree without --force", async () => {
   await Bun.write(`${wtPath}/test.txt`, "changes");
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} remove feature-dirty`.cwd(testRepo.path).text();
-  expect(result).toContain("uncommitted changes") || expect(result).toContain("error");
+  expect(result.includes("uncommitted changes") || result.includes("error")).toBe(true);
 });
 
 test("remove - force remove dirty worktree", async () => {
@@ -87,7 +90,7 @@ test("remove - force remove dirty worktree", async () => {
   await Bun.write(`${wtPath}/test.txt`, "changes");
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} remove feature-force --force`.cwd(testRepo.path).text();
-  expect(result).toContain("Worktree removed") || expect(result).toContain("Removed");
+  expect(result.includes("Worktree removed") || result.includes("Removed")).toBe(true);
 });
 
 test("remove - JSON output includes path", async () => {
@@ -122,14 +125,14 @@ test("clone - create detached worktree from another", async () => {
   const source = await createTestWorktree(testRepo.path, "feature-source", true);
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} clone feature-source feature-clone`.cwd(testRepo.path).text();
-  expect(result).toContain("cloned") || expect(result).toContain("Worktree");
+  expect(result.includes("cloned") || result.includes("Worktree")).toBe(true);
 });
 
 test("clone - create with -b flag creates new branch", async () => {
   const source = await createTestWorktree(testRepo.path, "feature-source-b", true);
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} clone feature-source-b feature-clone-b -b`.cwd(testRepo.path).text();
-  expect(result).toContain("cloned") || expect(result).toContain("new branch");
+  expect(result.includes("cloned") || result.includes("new branch")).toBe(true);
 });
 
 test("clone - JSON output includes source commit", async () => {
@@ -148,13 +151,13 @@ test("prune - remove stale worktrees", async () => {
   await Bun.$`rm -rf ${[wtPath]}`.quiet();
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} prune`.cwd(testRepo.path).text();
-  expect(result).toContain("Pruned") || expect(result).toContain("prune");
+  expect(result.includes("Pruned") || result.includes("prune")).toBe(true);
 });
 
 test("prune --dry-run shows what would be pruned", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} prune --dry-run`.cwd(testRepo.path).text();
-  expect(result).toContain("dry run") || expect(result).toContain("Pruned");
+  expect(result.includes("dry run") || result.includes("Pruned")).toBe(true);
 });
 
 test("lock - lock a worktree", async () => {
@@ -201,5 +204,5 @@ test("path - resolve branch to worktree path", async () => {
   await createTestWorktree(testRepo.path, "feature-path", true);
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} path feature-path`.cwd(testRepo.path).text();
-  expect(result).toContain(".worktrees") || expect(result).toContain("feature-path");
+  expect(result.includes(".worktrees") || result.includes("feature-path")).toBe(true);
 });

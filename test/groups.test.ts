@@ -2,7 +2,8 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import {
   createTempTestRepo,
   parseJSONOutput,
-  TestRepo,
+  resetForestConfig,
+  type TestRepo,
 } from "./test-utils";
 
 let testRepo: TestRepo;
@@ -11,15 +12,16 @@ beforeEach(async () => {
   testRepo = await createTempTestRepo("forest-groups");
 });
 
-afterEach(() => {
+afterEach(async () => {
   testRepo.cleanup();
+  await resetForestConfig();
 });
 
 test("groups - list all namespace groups", async () => {
   // Create worktrees with different namespaces
-  await Bun.$`git -C ${[testRepo.path]} branch feature/auth -b`.quiet();
-  await Bun.$`git -C ${[testRepo.path]} branch feature/ui -b`.quiet();
-  await Bun.$`git -C ${[testRepo.path]} branch bugfix/login -b`.quiet();
+  await Bun.$`git -C ${[testRepo.path]} branch feature/auth`.quiet();
+  await Bun.$`git -C ${[testRepo.path]} branch feature/ui`.quiet();
+  await Bun.$`git -C ${[testRepo.path]} branch bugfix/login`.quiet();
   
   const wtDir1 = `${testRepo.path}/.worktrees/feature-auth`;
   const wtDir2 = `${testRepo.path}/.worktrees/feature-ui`;
@@ -68,7 +70,7 @@ test("groups - count worktrees per group", async () => {
 test("groups --verbose shows worktrees in each group", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} groups --verbose`.cwd(testRepo.path).text();
-  expect(result).toContain("Git Worktree Groups") || expect(result).length > 0;
+  expect(result.includes("Git Worktree Groups") || result.length > 0).toBe(true);
 });
 
 test("list --group filters by namespace", async () => {

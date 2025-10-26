@@ -237,7 +237,7 @@ function extractNamespace(branch: string): { namespace: string; name: string } {
   if (parts.length > 1) {
     return {
       namespace: parts.slice(0, -1).join("/"),
-      name: parts[parts.length - 1],
+      name: parts[parts.length - 1] || "",
     };
   }
   return { namespace: "", name: branch };
@@ -286,10 +286,20 @@ async function getWorktreePath(branchOrPath: string, group?: string): Promise<st
 }
 
 async function resolveWorktreePath(branchOrPath: string): Promise<string> {
-  if (!branchOrPath.includes("/")) {
-    return await getWorktreePath(branchOrPath);
+  // If it's a path, return as-is
+  if (branchOrPath.includes("/")) {
+    return branchOrPath;
   }
-  return branchOrPath;
+
+  // Check if worktree with this branch exists
+  const worktrees = await getWorktrees();
+  const existing = worktrees.find(w => w.branch === branchOrPath);
+  if (existing) {
+    return existing.path;
+  }
+
+  // Generate new path from config
+  return await getWorktreePath(branchOrPath);
 }
 
 function validatePath(path: string): { valid: boolean; error?: string } {
@@ -1009,6 +1019,8 @@ async function cmdSync(flags: Record<string, boolean | string>): Promise<Command
 
     for (let i = 0; i < worktrees.length; i++) {
       const wt = worktrees[i];
+      if (!wt) continue;
+      
       spinner.start(`Syncing (${i + 1}/${worktrees.length}): ${wt.path.split("/").pop() || wt.path}...`);
       
       try {

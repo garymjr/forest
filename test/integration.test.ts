@@ -3,7 +3,8 @@ import {
   createTempTestRepo,
   makeWorktreeDirty,
   parseJSONOutput,
-  TestRepo,
+  resetForestConfig,
+  type TestRepo,
 } from "./test-utils";
 
 let testRepo: TestRepo;
@@ -12,8 +13,9 @@ beforeEach(async () => {
   testRepo = await createTempTestRepo("forest-integration");
 });
 
-afterEach(() => {
+afterEach(async () => {
   testRepo.cleanup();
+  await resetForestConfig();
 });
 
 test("integration - full workflow: add, modify, status, remove", async () => {
@@ -37,7 +39,7 @@ test("integration - full workflow: add, modify, status, remove", async () => {
 
   // Remove with force
   const rmResult = await Bun.$`bun ${[`${forestDir}/../index.ts`]} remove feature-workflow --force`.cwd(testRepo.path).text();
-  expect(rmResult).toContain("Worktree removed") || expect(rmResult).toContain("Removed");
+  expect(rmResult.includes("Worktree removed") || rmResult.includes("Removed")).toBe(true);
 });
 
 test("integration - clone workflow: create source, clone, verify", async () => {
@@ -68,7 +70,7 @@ test("integration - config persistence across operations", async () => {
   // Set custom directory
   const forestDir = import.meta.dir;
   const configResult = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ~/.test-forest-custom`.cwd(testRepo.path).text();
-  expect(configResult).toContain("updated") || expect(configResult).toContain("Config");
+  expect(configResult.includes("updated") || configResult.includes("Config")).toBe(true);
 
   // Verify it persists
   const getResult = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get directory`.cwd(testRepo.path).text();

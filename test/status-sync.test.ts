@@ -4,7 +4,8 @@ import {
   createTestWorktree,
   makeWorktreeDirty,
   parseJSONOutput,
-  TestRepo,
+  resetForestConfig,
+  type TestRepo,
 } from "./test-utils";
 
 let testRepo: TestRepo;
@@ -13,8 +14,9 @@ beforeEach(async () => {
   testRepo = await createTempTestRepo("forest-status-sync");
 });
 
-afterEach(() => {
+afterEach(async () => {
   testRepo.cleanup();
+  await resetForestConfig();
 });
 
 test("status - show all clean worktrees", async () => {
@@ -42,7 +44,7 @@ test("status - identify dirty worktrees", async () => {
   await makeWorktreeDirty(wtPath);
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} status`.cwd(testRepo.path).text();
-  expect(result).toContain("dirty") || expect(result).toContain("⚠");
+  expect(result.includes("dirty") || result.includes("⚠")).toBe(true);
 });
 
 test("status - summary includes counts", async () => {
@@ -75,7 +77,7 @@ test("sync - syncs clean worktrees", async () => {
   
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} sync`.cwd(testRepo.path).text();
-  expect(result).toContain("Sync") || expect(result).toContain("Synced") || expect(result).toContain("skipped");
+  expect(result.includes("Sync") || result.includes("Synced") || result.includes("skipped")).toBe(true);
 });
 
 test("sync - JSON output includes results", async () => {
@@ -102,7 +104,7 @@ test("sync - force syncs dirty worktrees", async () => {
   await makeWorktreeDirty(wtPath);
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} sync --force`.cwd(testRepo.path).text();
-  expect(result).toContain("Sync") || expect(result).toContain("Synced") || expect(result).toContain("stash");
+  expect(result.includes("Sync") || result.includes("Synced") || result.includes("stash")).toBe(true);
 });
 
 test("sync - summary includes total counts", async () => {

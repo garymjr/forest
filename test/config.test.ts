@@ -2,7 +2,8 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import {
   createTempTestRepo,
   parseJSONOutput,
-  TestRepo,
+  resetForestConfig,
+  type TestRepo,
 } from "./test-utils";
 import { rmSync } from "fs";
 import { join } from "path";
@@ -15,11 +16,12 @@ beforeEach(async () => {
   originalConfigHome = Bun.env.HOME;
 });
 
-afterEach(() => {
+afterEach(async () => {
   testRepo.cleanup();
   if (originalConfigHome) {
     process.env.HOME = originalConfigHome;
   }
+  await resetForestConfig();
 });
 
 test("config - get default directory", async () => {
@@ -67,19 +69,19 @@ test("config - reset to defaults", async () => {
 test("config - reject unknown config key", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get unknown-key`.cwd(testRepo.path).text();
-  expect(result).toContain("Unknown") || expect(result).toContain("error");
+  expect(result.includes("Unknown") || result.includes("error")).toBe(true);
 });
 
 test("config - set requires value", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory`.cwd(testRepo.path).text();
-  expect(result).toContain("required") || expect(result).toContain("error");
+  expect(result.includes("required") || result.includes("error")).toBe(true);
 });
 
 test("config - reject invalid set action", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config invalid directory value`.cwd(testRepo.path).text();
-  expect(result).toContain("Unknown") || expect(result).toContain("Invalid");
+  expect(result.includes("Unknown") || result.includes("Invalid")).toBe(true);
 });
 
 test("config - JSON output includes key and value", async () => {
@@ -103,7 +105,7 @@ test("config - supports tilde expansion", async () => {
 test("config - empty path rejected", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ""`.cwd(testRepo.path).text();
-  expect(result).toContain("error") || expect(result).toContain("cannot be empty");
+  expect(result.includes("error") || result.includes("cannot be empty")).toBe(true);
 });
 
 test("config - validate on load from disk", async () => {

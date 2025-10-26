@@ -2,7 +2,8 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import {
   createTempTestRepo,
   parseJSONOutput,
-  TestRepo,
+  resetForestConfig,
+  type TestRepo,
 } from "./test-utils";
 
 let testRepo: TestRepo;
@@ -11,20 +12,21 @@ beforeEach(async () => {
   testRepo = await createTempTestRepo("forest-validation");
 });
 
-afterEach(() => {
+afterEach(async () => {
   testRepo.cleanup();
+  await resetForestConfig();
 });
 
 test("validation - reject path with null bytes", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} add "feature\0test" -b`.cwd(testRepo.path).catch((e) => e);
-  expect(result.exitCode).not.toBe(0) || expect(result.stdout).toContain("error");
+  expect(result.exitCode !== 0 || result.stdout.includes("error")).toBe(true);
 });
 
 test("validation - reject branch with newlines", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} add "feature\ntest" -b`.cwd(testRepo.path).catch((e) => e);
-  expect(result.exitCode).not.toBe(0) || expect(result.stdout).toContain("error");
+  expect(result.exitCode !== 0 || result.stdout.includes("error")).toBe(true);
 });
 
 test("validation - reject empty branch name", async () => {
@@ -75,13 +77,13 @@ test("validation - allow valid user paths", async () => {
 test("validation - config rejects invalid directory", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory "/etc/shadow"`.cwd(testRepo.path).text();
-  expect(result).toContain("error") || expect(result).toContain("sensitive");
+  expect(result.includes("error") || result.includes("sensitive")).toBe(true);
 });
 
 test("validation - config rejects path traversal", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory "~/foo/../../etc"`.cwd(testRepo.path).text();
-  expect(result).toContain("traversal") || expect(result).toContain("error");
+  expect(result.includes("traversal") || result.includes("error")).toBe(true);
 });
 
 test("validation - config accepts valid home directory path", async () => {
@@ -100,7 +102,7 @@ test("validation - invalid command exits with code 2", async () => {
 test("validation - missing required arguments", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} add`.cwd(testRepo.path).catch((e) => e);
-  expect(result.exitCode).toBe(2) || expect(result.stdout).toContain("Missing");
+  expect(result.exitCode === 2 || result.stdout.includes("Missing")).toBe(true);
 });
 
 test("validation - remove non-existent worktree", async () => {

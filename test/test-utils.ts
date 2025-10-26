@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -19,6 +19,9 @@ export async function createTempTestRepo(name = "test-repo"): Promise<TestRepo> 
     await Bun.$`touch ${[join(tempDir, "README.md")]}`.quiet();
     await Bun.$`git -C ${[tempDir]} add .`.quiet();
     await Bun.$`git -C ${[tempDir]} commit -m "Initial commit"`.quiet();
+    
+    // Set config to point to this test repo's .worktrees directory
+    await setTestConfig(tempDir);
   } catch (error) {
     rmSync(tempDir, { recursive: true, force: true });
     throw error;
@@ -29,6 +32,8 @@ export async function createTempTestRepo(name = "test-repo"): Promise<TestRepo> 
     cleanup: () => {
       try {
         rmSync(tempDir, { recursive: true, force: true });
+        // Reset config after cleanup
+        resetForestConfig();
       } catch (error) {
         // Ignore cleanup errors
       }
@@ -135,5 +140,35 @@ export async function runForestCommand(
       stderr: error.stderr?.toString() || "",
       exitCode: error.exitCode || 1,
     };
+  }
+}
+
+// Config isolation helpers
+const CONFIG_DIR = `${process.env.HOME}/.config/forest`;
+const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
+const DEFAULT_WORKTREE_DIR = `${process.env.HOME}/.forest/worktrees`;
+
+export async function resetForestConfig(): Promise<void> {
+  try {
+    // Remove the config file to reset to defaults
+    if (existsSync(CONFIG_FILE)) {
+      rmSync(CONFIG_FILE, { force: true });
+    }
+  } catch (error) {
+    // Ignore cleanup errors
+  }
+}
+
+export async function setTestConfig(repoPath: string): Promise<void> {
+  try {
+    // Ensure config directory exists
+    await Bun.$`mkdir -p ${[CONFIG_DIR]}`.quiet();
+    
+    // Set config to point to the test repo's .worktrees directory
+    const worktreeDir = join(repoPath, ".worktrees");
+    const config = { directory: worktreeDir };
+    await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
+  } catch (error) {
+    throw new Error(`Failed to set test config: ${error}`);
   }
 }
