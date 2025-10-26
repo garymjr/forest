@@ -2,6 +2,67 @@
 
 const VERSION = "0.5.0";
 
+// Color utilities with NO_COLOR support
+function getColors() {
+  const noColor = Bun.env.NO_COLOR || process.argv.includes("--no-color");
+  if (noColor) {
+    return {
+      green: "",
+      red: "",
+      yellow: "",
+      cyan: "",
+      gray: "",
+      dim: "",
+      reset: "",
+      success: (text: string) => text,
+      error: (text: string) => text,
+      warning: (text: string) => text,
+      info: (text: string) => text,
+    };
+  }
+  return {
+    green: "\x1b[32m",
+    red: "\x1b[31m",
+    yellow: "\x1b[33m",
+    cyan: "\x1b[36m",
+    gray: "\x1b[90m",
+    dim: "\x1b[2m",
+    reset: "\x1b[0m",
+    success: (text: string) => `\x1b[32m${text}\x1b[0m`,
+    error: (text: string) => `\x1b[31m${text}\x1b[0m`,
+    warning: (text: string) => `\x1b[33m${text}\x1b[0m`,
+    info: (text: string) => `\x1b[36m${text}\x1b[0m`,
+  };
+}
+
+// Spinner for progress indication
+class Spinner {
+  private frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  private frameIndex = 0;
+  private message = "";
+  private intervalId?: Timer;
+  private isTTY = process.stdout.isTTY ?? false;
+
+  start(message: string) {
+    if (!this.isTTY || process.argv.includes("--no-progress")) return;
+    this.message = message;
+    this.frameIndex = 0;
+    this.intervalId = setInterval(() => {
+      process.stdout.write(`\r${this.frames[this.frameIndex % this.frames.length]} ${this.message}`);
+      this.frameIndex++;
+    }, 80);
+  }
+
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      process.stdout.write("\r");
+    }
+  }
+}
+
+const spinner = new Spinner();
+
 interface Worktree {
   path: string;
   branch: string;
@@ -115,6 +176,15 @@ async function ensureConfigDir(): Promise<void> {
     await Bun.$`mkdir -p ${[CONFIG_DIR]}`.quiet();
   } catch (error) {
     // Ignore errors, directory might already exist
+  }
+}
+
+async function getLastCommitMessage(path: string): Promise<string> {
+  try {
+    const message = await Bun.$`git -C ${[path]} log -1 --pretty=%s`.quiet().text();
+    return message.trim();
+  } catch (error) {
+    return "";
   }
 }
 
@@ -389,19 +459,60 @@ async function cmdList(flags: Record<string, boolean | string>): Promise<Command
       return { success: true, data: { worktrees: [] } };
     }
 
+    const colors = getColors();
     console.log("Git Worktrees:");
-    console.log("─".repeat(60));
+    console.log("─".repeat(80));
+
+    spinner.start("Fetching worktree information...");
+    
     for (const wt of worktrees) {
-      const status = [];
-      if (wt.locked) status.push("locked");
-      if (wt.prunable) status.push("prunable");
-      const statusStr = status.length > 0 ? ` [${status.join(", ")}]` : "";
-      console.log(`${wt.path}`);
-      console.log(`  Branch: ${wt.branch} (${wt.commit})${statusStr}`);
+      spinner.stop();
+      
+      const status = await getWorktreeStatus(wt);
+      const lastMsg = await getLastCommitMessage(wt.path);
+      
+      // Determine icon and color based on status
+      let icon = colors.success("✓");
+      if (status.conflicts) {
+        icon = colors.error("✗");
+      } else if (status.dirty) {
+        icon = colors.warning("⚠");
+      }
+
+      // Build status flags
+      const flags = [];
+      if (wt.locked) flags.push(colors.warning("[locked]"));
+      if (wt.prunable) flags.push(colors.error("[prunable]"));
+      const flagStr = flags.length > 0 ? ` ${flags.join(" ")}` : "";
+
+      console.log(`${icon} ${colors.cyan(wt.path)}${flagStr}`);
+      console.log(`  ${colors.dim("Branch:")} ${wt.branch} ${colors.gray(`(${wt.commit})`)}${status.ahead > 0 || status.behind > 0 ? ` ${colors.yellow(`↑${status.ahead} ↓${status.behind}`)}` : ""}`);
+      
+      if (lastMsg) {
+        console.log(`  ${colors.dim("Commit:")} ${lastMsg.substring(0, 60)}${lastMsg.length > 60 ? "..." : ""}`);
+      }
+
+      if (status.dirty || status.conflicts) {
+        let dirtyStr = "";
+        if (status.conflicts) {
+          dirtyStr = colors.error(`CONFLICTS (${status.stagedFiles + status.unstagedFiles} files)`);
+        } else {
+          const parts = [];
+          if (status.stagedFiles > 0) parts.push(`${status.stagedFiles} staged`);
+          if (status.unstagedFiles > 0) parts.push(`${status.unstagedFiles} unstaged`);
+          if (status.untrackedFiles > 0) parts.push(`${status.untrackedFiles} untracked`);
+          dirtyStr = colors.warning(`dirty (${parts.join(", ")})`);
+        }
+        console.log(`  ${colors.dim("Status:")} ${dirtyStr}`);
+      } else {
+        console.log(`  ${colors.dim("Status:")} ${colors.success("clean")}`);
+      }
     }
 
+    console.log("─".repeat(80));
     return { success: true, data: { worktrees } };
   } catch (error) {
+    spinner.stop();
     return {
       success: false,
       error: {
@@ -483,6 +594,9 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
   }
 
   try {
+    const colors = getColors();
+    spinner.start(`Creating worktree at ${path}...`);
+
     // Ensure parent directory exists
     const parentDir = path.split("/").slice(0, -1).join("/");
     if (parentDir) {
@@ -497,17 +611,20 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
       await Bun.$`git worktree add ${[path]} ${[branch]}`.quiet();
     }
 
+    spinner.stop();
+
     const result = {
       success: true,
       data: { message: `Worktree created: ${path} → ${branch}`, path, branch, new_branch: !!newBranch },
     };
 
     if (!flags.json) {
-      console.log(`✓ Worktree created: ${path} → ${branch}${newBranch ? " (new branch)" : ""}`);
+      console.log(colors.success(`✓ Worktree created: ${path} → ${branch}${newBranch ? " (new branch)" : ""}`));
     }
 
     return result;
   } catch (error) {
+    spinner.stop();
     return {
       success: false,
       error: {
@@ -528,7 +645,7 @@ async function cmdRemove(args: string[], flags: Record<string, boolean | string>
       error: {
         code: "INVALID_ARGS",
         message: "Missing required argument",
-        suggestion: "Usage: forest remove <branch|path>",
+        suggestion: "Usage: forest remove <branch|path> [--force]",
       },
     };
   }
@@ -548,7 +665,33 @@ async function cmdRemove(args: string[], flags: Record<string, boolean | string>
   }
 
   try {
-    await Bun.$`git worktree remove ${[path]}`.quiet();
+    const colors = getColors();
+    const force = flags.force;
+
+    // Check if worktree has uncommitted changes
+    if (!force) {
+      try {
+        const worktrees = await getWorktrees();
+        const worktree = worktrees.find((w) => w.path === path);
+        if (worktree) {
+          const status = await getWorktreeStatus(worktree);
+          if (status.dirty) {
+            return {
+              success: false,
+              error: {
+                code: "DIRTY_WORKTREE",
+                message: "Cannot remove worktree with uncommitted changes",
+                suggestion: `Use ${colors.cyan("--force")} to remove anyway, or commit/stash changes first`,
+              },
+            };
+          }
+        }
+      } catch (error) {
+        // If we can't check status, continue with removal
+      }
+    }
+
+    await Bun.$`git worktree remove ${[path]}${force ? " --force" : ""}`.quiet();
 
     const result = {
       success: true,
@@ -556,11 +699,16 @@ async function cmdRemove(args: string[], flags: Record<string, boolean | string>
     };
 
     if (!flags.json) {
-      console.log(`✓ Worktree removed: ${path}`);
+      if (force) {
+        console.log(colors.warning(`⚠ Removed worktree with uncommitted changes: ${path}`));
+      } else {
+        console.log(colors.success(`✓ Worktree removed: ${path}`));
+      }
     }
 
     return result;
   } catch (error) {
+    const colors = getColors();
     return {
       success: false,
       error: {
@@ -574,9 +722,14 @@ async function cmdRemove(args: string[], flags: Record<string, boolean | string>
 
 async function cmdPrune(flags: Record<string, boolean | string>): Promise<CommandResult> {
   try {
+    const colors = getColors();
     const dryRun = flags["dry-run"];
+    spinner.start("Pruning worktrees...");
+
     const cmd = dryRun ? `git worktree prune --dry-run` : `git worktree prune`;
     const result = await Bun.$`${cmd}`.quiet().text();
+
+    spinner.stop();
 
     const pruned = result
       .split("\n")
@@ -589,7 +742,7 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
     };
 
     if (!flags.json) {
-      console.log(`✓ Pruned ${pruned.length} worktree(s)${dryRun ? " (dry run)" : ""}`);
+      console.log(colors.success(`✓ Pruned ${pruned.length} worktree(s)${dryRun ? " (dry run)" : ""}`));
       if (pruned.length > 0) {
         console.log("Removed:");
         pruned.forEach((p) => console.log(`  - ${p}`));
@@ -598,6 +751,7 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
 
     return response;
   } catch (error) {
+    spinner.stop();
     return {
       success: false,
       error: {
@@ -611,6 +765,7 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
 
 async function cmdSync(flags: Record<string, boolean | string>): Promise<CommandResult> {
   try {
+    const colors = getColors();
     const worktrees = await getWorktrees();
     const force = flags.force;
     const all = flags.all;
@@ -621,7 +776,10 @@ async function cmdSync(flags: Record<string, boolean | string>): Promise<Command
       failed: [] as { path: string; error: string }[],
     };
 
-    for (const wt of worktrees) {
+    for (let i = 0; i < worktrees.length; i++) {
+      const wt = worktrees[i];
+      spinner.start(`Syncing (${i + 1}/${worktrees.length}): ${wt.path.split("/").pop() || wt.path}...`);
+      
       try {
         // Get status of the worktree
         const status = await getWorktreeStatus(wt);
@@ -675,6 +833,8 @@ async function cmdSync(flags: Record<string, boolean | string>): Promise<Command
       }
     }
 
+    spinner.stop();
+
     const response = {
       success: results.failed.length === 0,
       data: { results, summary: {
@@ -690,18 +850,18 @@ async function cmdSync(flags: Record<string, boolean | string>): Promise<Command
       console.log("─".repeat(80));
       
       if (results.synced.length > 0) {
-        console.log(`✓ Synced ${results.synced.length} worktree(s):`);
+        console.log(colors.success(`✓ Synced ${results.synced.length} worktree(s):`));
         results.synced.forEach((p) => console.log(`  - ${p}`));
       }
 
       if (results.skipped.length > 0) {
-        console.log(`⊘ Skipped ${results.skipped.length} worktree(s):`);
-        results.skipped.forEach((item) => console.log(`  - ${item.path} (${item.reason})`));
+        console.log(colors.warning(`⊘ Skipped ${results.skipped.length} worktree(s):`));
+        results.skipped.forEach((item) => console.log(`  - ${item.path} (${colors.dim(item.reason)})`));
       }
 
       if (results.failed.length > 0) {
-        console.log(`✗ Failed ${results.failed.length} worktree(s):`);
-        results.failed.forEach((item) => console.log(`  - ${item.path} (${item.error})`));
+        console.log(colors.error(`✗ Failed ${results.failed.length} worktree(s):`));
+        results.failed.forEach((item) => console.log(`  - ${item.path} (${colors.dim(item.error)})`));
       }
 
       if (results.synced.length === 0 && results.failed.length === 0) {
@@ -709,11 +869,12 @@ async function cmdSync(flags: Record<string, boolean | string>): Promise<Command
       }
       
       console.log("─".repeat(80));
-      console.log(`Summary: ${results.synced.length} synced, ${results.skipped.length} skipped, ${results.failed.length} failed`);
+      console.log(colors.info(`Summary: ${results.synced.length} synced, ${results.skipped.length} skipped, ${results.failed.length} failed`));
     }
 
     return response;
   } catch (error) {
+    spinner.stop();
     return {
       success: false,
       error: {
@@ -727,10 +888,13 @@ async function cmdSync(flags: Record<string, boolean | string>): Promise<Command
 
 async function cmdStatus(flags: Record<string, boolean | string>): Promise<CommandResult> {
   try {
+    const colors = getColors();
     const worktrees = await getWorktrees();
     const all = flags.all;
     
+    spinner.start("Fetching worktree status...");
     const statuses = await Promise.all(worktrees.map((wt) => getWorktreeStatus(wt)));
+    spinner.stop();
     
     const summary = {
       total: statuses.length,
@@ -750,51 +914,52 @@ async function cmdStatus(flags: Record<string, boolean | string>): Promise<Comma
       console.log("─".repeat(80));
       
       for (const status of statuses) {
-        let icon = "✓";
+        let icon = colors.success("✓");
         if (status.conflicts) {
-          icon = "✗";
+          icon = colors.error("✗");
         } else if (status.dirty) {
-          icon = "⚠";
+          icon = colors.warning("⚠");
         }
         
-        const lockStr = status.locked ? " [LOCKED]" : "";
-        console.log(`${icon} ${status.path}${lockStr}`);
-        console.log(`  Branch: ${status.branch} (${status.commit})`);
+        const lockStr = status.locked ? ` ${colors.warning("[LOCKED]")}` : "";
+        console.log(`${icon} ${colors.cyan(status.path)}${lockStr}`);
+        console.log(`  ${colors.dim("Branch:")} ${status.branch} ${colors.gray(`(${status.commit})`)} `);
         
         const trackingStr = [];
         if (status.hasUpstream) {
-          if (status.behind > 0) trackingStr.push(`↓${status.behind}`);
-          if (status.ahead > 0) trackingStr.push(`↑${status.ahead}`);
-          if (trackingStr.length === 0) trackingStr.push("✓ up-to-date");
+          if (status.behind > 0) trackingStr.push(colors.warning(`↓${status.behind}`));
+          if (status.ahead > 0) trackingStr.push(colors.info(`↑${status.ahead}`));
+          if (trackingStr.length === 0) trackingStr.push(colors.success("✓ up-to-date"));
         } else {
-          trackingStr.push("✗ no upstream");
+          trackingStr.push(colors.error("✗ no upstream"));
         }
         
         if (status.dirty || status.conflicts) {
           let statusStr = "";
           if (status.conflicts) {
-            statusStr = `CONFLICTS (${status.stagedFiles + status.unstagedFiles} files)`;
+            statusStr = colors.error(`CONFLICTS (${status.stagedFiles + status.unstagedFiles} files)`);
           } else {
             const parts = [];
-            if (status.stagedFiles > 0) parts.push(`${status.stagedFiles} staged`);
-            if (status.unstagedFiles > 0) parts.push(`${status.unstagedFiles} unstaged`);
-            if (status.untrackedFiles > 0) parts.push(`${status.untrackedFiles} untracked`);
-            statusStr = `DIRTY (${parts.join(", ")})`;
+            if (status.stagedFiles > 0) parts.push(colors.info(`${status.stagedFiles} staged`));
+            if (status.unstagedFiles > 0) parts.push(colors.warning(`${status.unstagedFiles} unstaged`));
+            if (status.untrackedFiles > 0) parts.push(colors.dim(`${status.untrackedFiles} untracked`));
+            statusStr = colors.warning(`DIRTY (${parts.join(", ")})`);
           }
-          console.log(`  Status: ${trackingStr.join(" ")} | ${statusStr}`);
+          console.log(`  ${colors.dim("Status:")} ${trackingStr.join(" ")} | ${statusStr}`);
         } else if (all) {
-          console.log(`  Status: ${trackingStr.join(" ")} | clean`);
+          console.log(`  ${colors.dim("Status:")} ${trackingStr.join(" ")} | ${colors.success("clean")}`);
         }
       }
       
       console.log("─".repeat(80));
       console.log(
-        `Summary: ${summary.total} worktrees (${summary.clean} clean, ${summary.dirty} dirty, ${summary.conflicts} conflicts${summary.locked > 0 ? `, ${summary.locked} locked` : ""})`
+        colors.info(`Summary: ${summary.total} worktrees (${colors.success(summary.clean + " clean")}, ${colors.warning(summary.dirty + " dirty")}, ${colors.error(summary.conflicts + " conflicts")}${summary.locked > 0 ? `, ${colors.warning(summary.locked + " locked")}` : ""})`)
       );
     }
 
     return response;
   } catch (error) {
+    spinner.stop();
     return {
       success: false,
       error: {
@@ -809,6 +974,7 @@ async function cmdStatus(flags: Record<string, boolean | string>): Promise<Comma
 const ALLOWED_CONFIG_KEYS = ["directory"];
 
 async function cmdConfig(args: string[], flags: Record<string, boolean | string>): Promise<CommandResult> {
+  const colors = getColors();
   const [action, key, ...valueParts] = args;
   const value = valueParts.join(" ");
 
@@ -830,7 +996,7 @@ async function cmdConfig(args: string[], flags: Record<string, boolean | string>
       await saveConfig(defaultConfig);
       const result = { success: true, data: { message: "Config reset to defaults" } };
       if (!flags.json) {
-        console.log("✓ Config reset to defaults");
+        console.log(colors.success("✓ Config reset to defaults"));
       }
       return result;
     } catch (error) {
@@ -875,7 +1041,7 @@ async function cmdConfig(args: string[], flags: Record<string, boolean | string>
       const configValue = (config as Record<string, any>)[key];
       const result = { success: true, data: { key, value: configValue } };
       if (!flags.json) {
-        console.log(`${key}=${configValue}`);
+        console.log(`${colors.dim(key + "=")}${configValue}`);
       }
       return result;
     } else if (action === "set") {
@@ -909,7 +1075,7 @@ async function cmdConfig(args: string[], flags: Record<string, boolean | string>
       await saveConfig(config);
       const result = { success: true, data: { key, value } };
       if (!flags.json) {
-        console.log(`✓ Config updated: ${key}=${value}`);
+        console.log(colors.success(`✓ Config updated: ${key}=${value}`));
       }
       return result;
     } else {
@@ -968,6 +1134,7 @@ async function cmdPath(args: string[], flags: Record<string, boolean | string>):
 }
 
 async function cmdLock(args: string[], flags: Record<string, boolean | string>): Promise<CommandResult> {
+  const colors = getColors();
   const [branchOrPath] = args;
 
   if (!branchOrPath) {
@@ -996,7 +1163,7 @@ async function cmdLock(args: string[], flags: Record<string, boolean | string>):
     };
 
     if (!flags.json) {
-      console.log(`✓ Worktree locked: ${path}${reason ? ` (${reason})` : ""}`);
+      console.log(colors.success(`✓ Worktree locked: ${path}${reason ? ` ${colors.dim(`(${reason})`)}` : ""}`));
     }
 
     return result;
@@ -1013,6 +1180,7 @@ async function cmdLock(args: string[], flags: Record<string, boolean | string>):
 }
 
 async function cmdUnlock(args: string[], flags: Record<string, boolean | string>): Promise<CommandResult> {
+  const colors = getColors();
   const [branchOrPath] = args;
 
   if (!branchOrPath) {
@@ -1041,7 +1209,7 @@ async function cmdUnlock(args: string[], flags: Record<string, boolean | string>
     };
 
     if (!flags.json) {
-      console.log(`✓ Worktree unlocked: ${path}`);
+      console.log(colors.success(`✓ Worktree unlocked: ${path}`));
     }
 
     return result;
@@ -1058,6 +1226,7 @@ async function cmdUnlock(args: string[], flags: Record<string, boolean | string>
 }
 
 async function cmdInfo(args: string[], flags: Record<string, boolean | string>): Promise<CommandResult> {
+  const colors = getColors();
   const [path] = args;
 
   if (!path) {
@@ -1089,11 +1258,11 @@ async function cmdInfo(args: string[], flags: Record<string, boolean | string>):
     const result = { success: true, data: worktree };
 
     if (!flags.json) {
-      console.log(`Worktree: ${worktree.path}`);
-      console.log(`  Branch: ${worktree.branch}`);
-      console.log(`  Commit: ${worktree.commit}`);
-      console.log(`  Locked: ${worktree.locked}`);
-      console.log(`  Prunable: ${worktree.prunable}`);
+      console.log(`${colors.dim("Worktree:")} ${colors.cyan(worktree.path)}`);
+      console.log(`  ${colors.dim("Branch:")} ${worktree.branch}`);
+      console.log(`  ${colors.dim("Commit:")} ${colors.yellow(worktree.commit)}`);
+      console.log(`  ${colors.dim("Locked:")} ${worktree.locked ? colors.warning("yes") : "no"}`);
+      console.log(`  ${colors.dim("Prunable:")} ${worktree.prunable ? colors.warning("yes") : "no"}`);
     }
 
     return result;
@@ -1199,27 +1368,28 @@ async function cmdSetup(flags: Record<string, boolean | string>): Promise<Comman
     };
 
     if (!flags.json) {
-      console.log("✓ Shell integration installed successfully!\n");
+      const colors = getColors();
+      console.log(colors.success("✓ Shell integration installed successfully!\n"));
       console.log("Completions installed:");
-      completionResult.files.forEach((f) => console.log(`  - ${f}`));
-      console.log(`\nHelper functions installed: ${functionsPath}\n`);
+      completionResult.files.forEach((f) => console.log(`  - ${colors.cyan(f)}`));
+      console.log(`\nHelper functions installed: ${colors.cyan(functionsPath)}\n`);
 
       console.log("Helper functions available:");
-      console.log("  fcd <branch>       - Change to worktree directory");
-      console.log("  fadd <branch>      - Create worktree and cd into it");
-      console.log("  fls                - List all worktrees");
-      console.log("  frm                - Remove current worktree and return to main repo");
-      console.log("  fsync              - Sync all worktrees with upstream\n");
+      console.log(`  ${colors.info("fcd <branch>")}       - Change to worktree directory`);
+      console.log(`  ${colors.info("fadd <branch>")}      - Create worktree and cd into it`);
+      console.log(`  ${colors.info("fls")}                - List all worktrees`);
+      console.log(`  ${colors.info("frm")}                - Remove current worktree and return to main repo`);
+      console.log(`  ${colors.info("fsync")}              - Sync all worktrees with upstream\n`);
 
-      console.log(`To enable these, add to your ${profileHint}:\n`);
-      console.log(`  source ${functionsPath}\n`);
+      console.log(`To enable these, add to your ${colors.dim(profileHint)}:\n`);
+      console.log(`  ${colors.yellow(`source ${functionsPath}`)}\n`);
 
       if (targetShell === "bash") {
-        console.log("Then restart your shell or run: source ~/.bashrc");
+        console.log(`Then restart your shell or run: ${colors.dim("source ~/.bashrc")}`);
       } else if (targetShell === "zsh") {
-        console.log("Then restart your shell or run: source ~/.zshrc");
+        console.log(`Then restart your shell or run: ${colors.dim("source ~/.zshrc")}`);
       } else if (targetShell === "fish") {
-        console.log("Then restart your shell or run: source ~/.config/fish/config.fish");
+        console.log(`Then restart your shell or run: ${colors.dim("source ~/.config/fish/config.fish")}`);
       }
     }
 
@@ -1316,7 +1486,7 @@ Examples:
   forest add feature-x -b                 # Create new branch from HEAD
   forest add feature-x -b --from main     # Create new branch from main`,
 
-      remove: `forest remove <branch|path> [--json]
+      remove: `forest remove <branch|path> [--force] [--json]
 
 Remove a worktree by branch name or explicit path.
 
@@ -1324,7 +1494,12 @@ Arguments:
   <branch|path>     Branch name or path to the worktree to remove
 
 Options:
-  --json    Output as JSON`,
+  --force   Remove worktree even if it has uncommitted changes
+  --json    Output as JSON
+
+Examples:
+  forest remove feature-x           # Remove a worktree
+  forest remove feature-x --force   # Remove worktree with uncommitted changes`,
 
       prune: `forest prune [--dry-run] [--json]
 

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 
 test("forest version command", async () => {
   const result = await Bun.$`bun ./index.ts --version`.text();
-  expect(result.trim()).toBe("forest v0.4.0");
+  expect(result.trim()).toBe("forest v0.5.0");
 });
 
 test("forest help command", async () => {
