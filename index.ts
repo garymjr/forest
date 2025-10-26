@@ -29,14 +29,61 @@ interface Config {
 const CONFIG_DIR = `${Bun.env.HOME}/.config/forest`;
 const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
 const DEFAULT_WORKTREE_DIR = `${Bun.env.HOME}/.forest/worktrees`;
+const SENSITIVE_PATHS = ["/", "/etc", "/usr", "/var", "/sys", "/proc", "/boot", "/dev", "/lib", "/sbin", "/bin"];
+
+function isValidConfigPath(path: string): { valid: boolean; error?: string } {
+  if (!path || path.trim().length === 0) {
+    return { valid: false, error: "Path cannot be empty" };
+  }
+  if (path.length > 4096) {
+    return { valid: false, error: "Path exceeds maximum length" };
+  }
+  if (path.includes("..")) {
+    return { valid: false, error: "Path traversal (..) not allowed" };
+  }
+  if (path.includes("\0")) {
+    return { valid: false, error: "Path contains null bytes" };
+  }
+  
+  // Check if path is a sensitive system directory
+  const normalizedPath = path.startsWith("~") ? `${Bun.env.HOME}${path.slice(1)}` : path;
+  for (const sensitive of SENSITIVE_PATHS) {
+    if (normalizedPath === sensitive || normalizedPath.startsWith(`${sensitive}/`)) {
+      return { valid: false, error: "Cannot use system or sensitive directories" };
+    }
+  }
+  
+  return { valid: true };
+}
+
+function validateConfig(obj: unknown): { valid: boolean; error?: string; config?: Config } {
+  if (!obj || typeof obj !== "object") {
+    return { valid: false, error: "Config must be an object" };
+  }
+  
+  const config = obj as Record<string, unknown>;
+  if (typeof config.directory !== "string") {
+    return { valid: false, error: "Config directory must be a string" };
+  }
+  
+  const pathValidation = isValidConfigPath(config.directory);
+  if (!pathValidation.valid) {
+    return { valid: false, error: pathValidation.error };
+  }
+  
+  return { valid: true, config: { directory: config.directory } };
+}
 
 function getConfig(): Config {
   try {
-    // Try to read the file synchronously by spawning cat
     const result = Bun.spawnSync(["cat", CONFIG_FILE]);
     const stdout: string = result.stdout instanceof Buffer ? result.stdout.toString() : (result.stdout as unknown as string) || "";
     if (stdout) {
-      return JSON.parse(stdout);
+      const parsed = JSON.parse(stdout);
+      const validation = validateConfig(parsed);
+      if (validation.valid && validation.config) {
+        return validation.config;
+      }
     }
   } catch (error) {
     // Return default if config doesn't exist or is invalid
@@ -49,9 +96,10 @@ async function saveConfig(config: Config): Promise<void> {
 }
 
 async function ensureConfigDir(): Promise<void> {
-  const dir = Bun.file(CONFIG_DIR);
-  if (!dir.exists()) {
+  try {
     await Bun.$`mkdir -p ${[CONFIG_DIR]}`.quiet();
+  } catch (error) {
+    // Ignore errors, directory might already exist
   }
 }
 
@@ -62,15 +110,25 @@ async function getRepoName(): Promise<string> {
     
     // Handle SSH URLs: git@github.com:user/repo.git
     if (name.includes("@")) {
-      name = name.split("/").pop() || "repo";
+      name = name.split("/").pop() || "";
     } else {
       // Handle HTTPS URLs: https://github.com/user/repo.git
-      name = name.split("/").pop() || "repo";
+      name = name.split("/").pop() || "";
     }
     
     // Remove .git suffix
-    name = name.replace(/\.git$/, "");
-    return name || "repo";
+    name = name.replace(/\.git$/, "").trim();
+    if (name) return name;
+  } catch (error) {
+    // Fall through to use directory name
+  }
+  
+  // Fallback: use git working directory name
+  try {
+    const dirResult = await Bun.$`git rev-parse --show-toplevel`.quiet().text();
+    const topLevel = dirResult.trim();
+    const dirName = topLevel.split("/").pop() || "repo";
+    return dirName;
   } catch (error) {
     return "repo";
   }
@@ -78,7 +136,9 @@ async function getRepoName(): Promise<string> {
 
 function sanitizeBranchName(branch: string): string {
   // Replace slashes and other invalid filesystem chars with dashes
-  return branch.replace(/[\/\\:*?"<>|]/g, "-").replace(/^-+|-+$/g, "");
+  const sanitized = branch.replace(/[\/\\:*?"<>|]/g, "-").replace(/^-+|-+$/g, "");
+  // Ensure result is not empty after sanitization
+  return sanitized || "branch";
 }
 
 async function getWorktreePath(branchOrPath: string): Promise<string> {
@@ -94,10 +154,11 @@ async function getWorktreePath(branchOrPath: string): Promise<string> {
   return `${config.directory}/${repoName}/${sanitized}`;
 }
 
-function parsePathToBranch(path: string): string {
-  // Extract branch name from path like ~/.forest/worktrees/repo/branch-name
-  const parts = path.split("/");
-  return parts[parts.length - 1] || "branch";
+async function resolveWorktreePath(branchOrPath: string): Promise<string> {
+  if (!branchOrPath.includes("/")) {
+    return await getWorktreePath(branchOrPath);
+  }
+  return branchOrPath;
 }
 
 function validatePath(path: string): { valid: boolean; error?: string } {
@@ -300,10 +361,9 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
     branch = first;
     path = await getWorktreePath(first);
     
-    // If second arg provided, use it as explicit branch name instead
+    // If second arg provided, use it as explicit branch name instead (don't recalculate path)
     if (second) {
       branch = second;
-      path = await getWorktreePath(second);
     }
   }
 
@@ -376,11 +436,7 @@ async function cmdRemove(args: string[], flags: Record<string, boolean | string>
     };
   }
 
-  // Try to resolve branch name to path if it's not an explicit path
-  let path = branchOrPath;
-  if (!branchOrPath.includes("/")) {
-    path = await getWorktreePath(branchOrPath);
-  }
+  const path = await resolveWorktreePath(branchOrPath);
 
   const pathValidation = validatePath(path);
   if (!pathValidation.valid) {
@@ -456,17 +512,63 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
   }
 }
 
+const ALLOWED_CONFIG_KEYS = ["directory"];
+
 async function cmdConfig(args: string[], flags: Record<string, boolean | string>): Promise<CommandResult> {
   const [action, key, ...valueParts] = args;
   const value = valueParts.join(" ");
 
-  if (!action || !key) {
+  if (!action) {
     return {
       success: false,
       error: {
         code: "INVALID_ARGS",
-        message: "Missing required arguments",
+        message: "Missing action argument",
         suggestion: "Usage: forest config [get|set|reset] [key] [value]",
+      },
+    };
+  }
+
+  if (action === "reset") {
+    try {
+      await ensureConfigDir();
+      const defaultConfig: Config = { directory: DEFAULT_WORKTREE_DIR };
+      await saveConfig(defaultConfig);
+      const result = { success: true, data: { message: "Config reset to defaults" } };
+      if (!flags.json) {
+        console.log("✓ Config reset to defaults");
+      }
+      return result;
+    } catch (error) {
+      return {
+        success: false,
+        error: {
+          code: "CONFIG_ERROR",
+          message: "Failed to reset config",
+          suggestion: "Check that config directory is writable",
+        },
+      };
+    }
+  }
+
+  if (!key) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_ARGS",
+        message: "Missing key argument",
+        suggestion: "Usage: forest config [get|set] <key> [value]",
+      },
+    };
+  }
+
+  if (!ALLOWED_CONFIG_KEYS.includes(key)) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_KEY",
+        message: `Unknown config key: ${key}`,
+        suggestion: `Allowed keys: ${ALLOWED_CONFIG_KEYS.join(", ")}`,
       },
     };
   }
@@ -493,19 +595,27 @@ async function cmdConfig(args: string[], flags: Record<string, boolean | string>
           },
         };
       }
+
+      // Validate path for directory key
+      if (key === "directory") {
+        const pathValidation = isValidConfigPath(value);
+        if (!pathValidation.valid) {
+          return {
+            success: false,
+            error: {
+              code: "INVALID_VALUE",
+              message: pathValidation.error || "Invalid directory path",
+              suggestion: "Use a valid user directory path (avoid system directories)",
+            },
+          };
+        }
+      }
+
       (config as Record<string, any>)[key] = value;
       await saveConfig(config);
       const result = { success: true, data: { key, value } };
       if (!flags.json) {
         console.log(`✓ Config updated: ${key}=${value}`);
-      }
-      return result;
-    } else if (action === "reset") {
-      const defaultConfig: Config = { directory: DEFAULT_WORKTREE_DIR };
-      await saveConfig(defaultConfig);
-      const result = { success: true, data: { message: "Config reset to defaults" } };
-      if (!flags.json) {
-        console.log("✓ Config reset to defaults");
       }
       return result;
     } else {
@@ -545,11 +655,7 @@ async function cmdPath(args: string[], flags: Record<string, boolean | string>):
   }
 
   try {
-    let path = branchOrPath;
-    if (!branchOrPath.includes("/")) {
-      path = await getWorktreePath(branchOrPath);
-    }
-
+    const path = await resolveWorktreePath(branchOrPath);
     const result = { success: true, data: { path } };
     if (!flags.json) {
       console.log(path);
@@ -582,11 +688,7 @@ async function cmdLock(args: string[], flags: Record<string, boolean | string>):
   }
 
   try {
-    let path = branchOrPath;
-    if (!branchOrPath.includes("/")) {
-      path = await getWorktreePath(branchOrPath);
-    }
-
+    const path = await resolveWorktreePath(branchOrPath);
     const reason = (flags.reason as string) || "";
     if (reason) {
       await Bun.$`git worktree lock ${[path]} --reason ${[reason]}`.quiet();
@@ -631,11 +733,7 @@ async function cmdUnlock(args: string[], flags: Record<string, boolean | string>
   }
 
   try {
-    let path = branchOrPath;
-    if (!branchOrPath.includes("/")) {
-      path = await getWorktreePath(branchOrPath);
-    }
-
+    const path = await resolveWorktreePath(branchOrPath);
     const force = flags.force;
     if (force) {
       await Bun.$`git worktree unlock ${[path]} --force`.quiet();
