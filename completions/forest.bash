@@ -6,8 +6,8 @@ _forest_complete() {
   local prev="${COMP_WORDS[COMP_CWORD-1]}"
   local cmd="${COMP_WORDS[1]}"
   
-  # Main commands
-  local commands="list add remove prune config path switch lock unlock info help"
+  # Main commands (including aliases)
+  local commands="list ls add mk clone remove rm prune sync info status st groups config path switch sw lock unlock setup help"
   
   # Complete main command
   if [ $COMP_CWORD -eq 1 ]; then
@@ -18,13 +18,31 @@ _forest_complete() {
   # Complete flags
   if [[ "$cur" == -* ]]; then
     case "$cmd" in
-      list|info)
-        COMPREPLY=($(compgen -W "--json --help" -- "$cur"))
+      list|ls)
+        COMPREPLY=($(compgen -W "--group --json --help" -- "$cur"))
         ;;
-      add)
-        COMPREPLY=($(compgen -W "--json --help" -- "$cur"))
+      add|mk)
+        COMPREPLY=($(compgen -W "-b --new-branch --from --group --json --help" -- "$cur"))
         ;;
-      remove|path|switch|lock|unlock)
+      clone)
+        COMPREPLY=($(compgen -W "-b --new-branch --json --help" -- "$cur"))
+        ;;
+      remove|rm)
+        COMPREPLY=($(compgen -W "--force --json --help" -- "$cur"))
+        ;;
+      prune)
+        COMPREPLY=($(compgen -W "--all --dry-run --json --help" -- "$cur"))
+        ;;
+      sync)
+        COMPREPLY=($(compgen -W "--group --force --json --help" -- "$cur"))
+        ;;
+      status|st)
+        COMPREPLY=($(compgen -W "--group --all --json --help" -- "$cur"))
+        ;;
+      groups)
+        COMPREPLY=($(compgen -W "--verbose --json --help" -- "$cur"))
+        ;;
+      path|switch|sw)
         COMPREPLY=($(compgen -W "--json --help" -- "$cur"))
         ;;
       lock)
@@ -33,11 +51,14 @@ _forest_complete() {
       unlock)
         COMPREPLY=($(compgen -W "--force --json --help" -- "$cur"))
         ;;
-      prune)
-        COMPREPLY=($(compgen -W "--dry-run --json --help" -- "$cur"))
+      info)
+        COMPREPLY=($(compgen -W "--json --help" -- "$cur"))
         ;;
       config)
         COMPREPLY=($(compgen -W "--json --help" -- "$cur"))
+        ;;
+      setup)
+        COMPREPLY=($(compgen -W "--shell --json --help" -- "$cur"))
         ;;
     esac
     return 0
@@ -45,14 +66,27 @@ _forest_complete() {
   
   # Complete arguments based on command
   case "$cmd" in
-    add)
+    add|mk)
       if [ $COMP_CWORD -eq 2 ]; then
         # First arg: suggest branches
         local branches=$(git branch --list 2>/dev/null | sed 's/^[* ]*//' | tr '\n' ' ')
         COMPREPLY=($(compgen -W "$branches" -- "$cur"))
+      elif [ "$prev" = "--from" ]; then
+        local branches=$(git branch --list 2>/dev/null | sed 's/^[* ]*//' | tr '\n' ' ')
+        COMPREPLY=($(compgen -W "$branches" -- "$cur"))
+      elif [ "$prev" = "--group" ]; then
+        local groups=$(forest groups --json 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep -v '(root)' | tr '\n' ' ')
+        COMPREPLY=($(compgen -W "$groups" -- "$cur"))
       fi
       ;;
-    remove|path|switch|unlock)
+    clone)
+      if [ $COMP_CWORD -eq 2 ] || [ $COMP_CWORD -eq 3 ]; then
+        # Complete with worktree branches for source and destination
+        local worktrees=$(forest list --json 2>/dev/null | grep -o '"branch":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')
+        COMPREPLY=($(compgen -W "$worktrees" -- "$cur"))
+      fi
+      ;;
+    remove|rm|path|switch|sw|unlock)
       if [ $COMP_CWORD -eq 2 ]; then
         # Complete with worktree branches/paths
         local worktrees=$(forest list --json 2>/dev/null | grep -o '"branch":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')
@@ -67,6 +101,12 @@ _forest_complete() {
         COMPREPLY=()
       fi
       ;;
+    list|ls|status|st|sync)
+      if [ "$prev" = "--group" ]; then
+        local groups=$(forest groups --json 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep -v '(root)' | tr '\n' ' ')
+        COMPREPLY=($(compgen -W "$groups" -- "$cur"))
+      fi
+      ;;
     info)
       if [ $COMP_CWORD -eq 2 ]; then
         # Complete with worktree paths
@@ -79,6 +119,11 @@ _forest_complete() {
         COMPREPLY=($(compgen -W "get set reset" -- "$cur"))
       elif [ $COMP_CWORD -eq 3 ]; then
         COMPREPLY=($(compgen -W "directory" -- "$cur"))
+      fi
+      ;;
+    setup)
+      if [ "$prev" = "--shell" ]; then
+        COMPREPLY=($(compgen -W "bash zsh fish all" -- "$cur"))
       fi
       ;;
     help)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 
 // Color utilities with NO_COLOR support
 function getColors() {
@@ -92,6 +92,12 @@ interface ParsedArgs {
   command?: string;
   args: string[];
   flags: Record<string, boolean | string>;
+}
+
+interface GroupInfo {
+  name: string;
+  count: number;
+  worktrees: Worktree[];
 }
 
 interface Config {
@@ -226,15 +232,55 @@ function sanitizeBranchName(branch: string): string {
   return sanitized || "branch";
 }
 
-async function getWorktreePath(branchOrPath: string): Promise<string> {
-  // If it looks like a path (contains /), use it as-is
-  if (branchOrPath.includes("/")) {
+function extractNamespace(branch: string): { namespace: string; name: string } {
+  const parts = branch.split("/");
+  if (parts.length > 1) {
+    return {
+      namespace: parts.slice(0, -1).join("/"),
+      name: parts[parts.length - 1],
+    };
+  }
+  return { namespace: "", name: branch };
+}
+
+function getNamespaceFromWorktrees(worktrees: Worktree[]): Map<string, Worktree[]> {
+  const groups = new Map<string, Worktree[]>();
+  
+  for (const wt of worktrees) {
+    const { namespace } = extractNamespace(wt.branch);
+    const groupName = namespace || "(root)";
+    
+    if (!groups.has(groupName)) {
+      groups.set(groupName, []);
+    }
+    groups.get(groupName)!.push(wt);
+  }
+  
+  return groups;
+}
+
+async function getWorktreePath(branchOrPath: string, group?: string): Promise<string> {
+  // If it looks like an absolute path, use it as-is
+  if (branchOrPath.startsWith("/") || branchOrPath.startsWith("~") || branchOrPath.startsWith(".")) {
     return branchOrPath;
   }
   
-  // Otherwise, generate path from central directory
+  // Check if namespace support is enabled
   const config = getConfig();
   const repoName = await getRepoName();
+  
+  // Extract namespace from branch name if present
+  const { namespace, name } = extractNamespace(branchOrPath);
+  const effectiveGroup = group || namespace;
+  
+  // Build path with namespace if present
+  if (effectiveGroup) {
+    const sanitizedGroup = sanitizeBranchName(effectiveGroup);
+    const sanitizedName = sanitizeBranchName(name);
+    return `${config.directory}/${repoName}/${sanitizedGroup}/${sanitizedName}`;
+  }
+  
+  // Otherwise, generate path from central directory without namespace
   const sanitized = sanitizeBranchName(branchOrPath);
   return `${config.directory}/${repoName}/${sanitized}`;
 }
@@ -444,8 +490,17 @@ async function getWorktreeStatus(worktree: Worktree): Promise<WorktreeStatus> {
 
 async function cmdList(flags: Record<string, boolean | string>): Promise<CommandResult> {
   try {
-    const worktrees = await getWorktrees();
+    let worktrees = await getWorktrees();
     const json = flags.json;
+    const groupFilter = flags.group as string | undefined;
+    
+    // Filter by group if specified
+    if (groupFilter) {
+      worktrees = worktrees.filter((wt) => {
+        const { namespace } = extractNamespace(wt.branch);
+        return namespace === groupFilter || (groupFilter === "(root)" && !namespace);
+      });
+    }
 
     if (json) {
       return {
@@ -532,6 +587,7 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
   let branch: string;
   const newBranch = flags["new-branch"];
   const branchFrom = (flags.from as string) || "";
+  const group = flags.group as string | undefined;
 
   if (!first) {
     return {
@@ -539,13 +595,13 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
       error: {
         code: "INVALID_ARGS",
         message: "Missing required arguments",
-        suggestion: "Usage: forest add <branch> [-b|--new-branch] [--from <base-branch>] or forest add <path> <branch>",
+        suggestion: "Usage: forest add <branch> [-b|--new-branch] [--from <base-branch>] [--group <group>] or forest add <path> <branch>",
       },
     };
   }
 
-  // If first arg contains "/" treat as explicit path
-  if (first.includes("/")) {
+  // If first arg starts with / or ~ or . treat as explicit path
+  if (first.startsWith("/") || first.startsWith("~") || first.startsWith(".")) {
     if (!second) {
       return {
         success: false,
@@ -561,7 +617,7 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
   } else {
     // Otherwise treat as branch name, generate path from central directory
     branch = first;
-    path = await getWorktreePath(first);
+    path = await getWorktreePath(first, group);
     
     // If second arg provided, use it as explicit branch name instead (don't recalculate path)
     if (second) {
@@ -832,25 +888,48 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
   try {
     const colors = getColors();
     const dryRun = flags["dry-run"];
+    const all = flags.all;
     spinner.start("Pruning worktrees...");
 
     const cmd = dryRun ? `git worktree prune --dry-run` : `git worktree prune`;
     const result = await Bun.$`${cmd}`.quiet().text();
-
-    spinner.stop();
 
     const pruned = result
       .split("\n")
       .filter(Boolean)
       .map((line) => line.trim());
 
+    let removedPrunable = 0;
+    
+    // If --all flag is set, also remove prunable worktrees
+    if (all && !dryRun) {
+      const worktrees = await getWorktrees();
+      const prunableWorktrees = worktrees.filter(wt => wt.prunable);
+      
+      for (const wt of prunableWorktrees) {
+        try {
+          await Bun.$`git worktree remove ${[wt.path]} --force`.quiet();
+          removedPrunable++;
+        } catch (error) {
+          // Continue with other worktrees if one fails
+        }
+      }
+    }
+
+    spinner.stop();
+
     const response = {
       success: true,
-      data: { message: `Pruned ${pruned.length} worktree(s)`, count: pruned.length, dry_run: !!dryRun },
+      data: { 
+        message: `Pruned ${pruned.length} worktree(s)${all ? ` and removed ${removedPrunable} prunable worktree(s)` : ""}`, 
+        count: pruned.length,
+        prunable_removed: removedPrunable,
+        dry_run: !!dryRun 
+      },
     };
 
     if (!flags.json) {
-      console.log(colors.success(`✓ Pruned ${pruned.length} worktree(s)${dryRun ? " (dry run)" : ""}`));
+      console.log(colors.success(`✓ Pruned ${pruned.length} worktree(s)${dryRun ? " (dry run)" : ""}${all && removedPrunable > 0 ? ` and removed ${removedPrunable} prunable worktree(s)` : ""}`));
       if (pruned.length > 0) {
         console.log("Removed:");
         pruned.forEach((p) => console.log(`  - ${p}`));
@@ -874,9 +953,18 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
 async function cmdSync(flags: Record<string, boolean | string>): Promise<CommandResult> {
   try {
     const colors = getColors();
-    const worktrees = await getWorktrees();
+    let worktrees = await getWorktrees();
     const force = flags.force;
     const all = flags.all;
+    const groupFilter = flags.group as string | undefined;
+    
+    // Filter by group if specified
+    if (groupFilter) {
+      worktrees = worktrees.filter((wt) => {
+        const { namespace } = extractNamespace(wt.branch);
+        return namespace === groupFilter || (groupFilter === "(root)" && !namespace);
+      });
+    }
     
     const results = {
       synced: [] as string[],
@@ -997,8 +1085,17 @@ async function cmdSync(flags: Record<string, boolean | string>): Promise<Command
 async function cmdStatus(flags: Record<string, boolean | string>): Promise<CommandResult> {
   try {
     const colors = getColors();
-    const worktrees = await getWorktrees();
+    let worktrees = await getWorktrees();
     const all = flags.all;
+    const groupFilter = flags.group as string | undefined;
+    
+    // Filter by group if specified
+    if (groupFilter) {
+      worktrees = worktrees.filter((wt) => {
+        const { namespace } = extractNamespace(wt.branch);
+        return namespace === groupFilter || (groupFilter === "(root)" && !namespace);
+      });
+    }
     
     spinner.start("Fetching worktree status...");
     const statuses = await Promise.all(worktrees.map((wt) => getWorktreeStatus(wt)));
@@ -1442,6 +1539,57 @@ async function copyFunctionsFile(): Promise<string> {
   }
 }
 
+async function cmdGroups(flags: Record<string, boolean | string>): Promise<CommandResult> {
+  try {
+    const colors = getColors();
+    const worktrees = await getWorktrees();
+    const groups = getNamespaceFromWorktrees(worktrees);
+    
+    const groupInfo: GroupInfo[] = [];
+    for (const [name, wts] of groups) {
+      groupInfo.push({ name, count: wts.length, worktrees: wts });
+    }
+    
+    // Sort by group name
+    groupInfo.sort((a, b) => a.name.localeCompare(b.name));
+    
+    const result = {
+      success: true,
+      data: { groups: groupInfo, total_groups: groupInfo.length },
+    };
+    
+    if (!flags.json) {
+      console.log("Git Worktree Groups:");
+      console.log("─".repeat(80));
+      
+      for (const group of groupInfo) {
+        const displayName = group.name === "(root)" ? colors.dim("(root)") : colors.cyan(group.name);
+        console.log(`${displayName} ${colors.gray(`(${group.count} worktree${group.count !== 1 ? "s" : ""})`)}`);
+        
+        if (flags.verbose) {
+          for (const wt of group.worktrees) {
+            console.log(`  - ${wt.branch} ${colors.gray(`(${wt.path})`)}`);
+          }
+        }
+      }
+      
+      console.log("─".repeat(80));
+      console.log(colors.info(`Total: ${groupInfo.length} group${groupInfo.length !== 1 ? "s" : ""}`));
+    }
+    
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: "GROUPS_ERROR",
+        message: "Failed to list groups",
+        suggestion: "Ensure you are in a git repository",
+      },
+    };
+  }
+}
+
 async function cmdSetup(flags: Record<string, boolean | string>): Promise<CommandResult> {
   let targetShell = (flags.shell as string) || detectShell();
 
@@ -1521,46 +1669,50 @@ function showHelp(command?: string): void {
 Usage: forest <command> [options]
 
 Commands:
-  list              List all worktrees
-  add <branch>      Create a new worktree (or add <path> <branch> for explicit path)
-  clone <src> <dst> Create a worktree from another worktree's current commit state
-  remove <branch>   Remove a worktree (or remove <path> for explicit path)
-  prune             Prune stale worktrees
-  sync              Pull updates across all worktrees
-  info <path>       Show worktree details
-  status            Show comprehensive status of all worktrees
-  path <branch>     Get path to worktree (useful in scripts)
-  switch <branch>   Alias for 'path'
-  config            Manage configuration
-  lock <branch>     Lock a worktree
-  unlock <branch>   Unlock a worktree
-  setup             Setup shell integration (completions, functions)
-  help [command]    Show help
+  list, ls              List all worktrees
+  add, mk <branch>      Create a new worktree (or add <path> <branch> for explicit path)
+  clone <src> <dst>     Create a worktree from another worktree's current commit state
+  remove, rm <branch>   Remove a worktree (or remove <path> for explicit path)
+  prune                 Prune stale worktrees
+  sync                  Pull updates across all worktrees
+  info <path>           Show worktree details
+  status, st            Show comprehensive status of all worktrees
+  groups                List all worktree groups/namespaces
+  path <branch>         Get path to worktree (useful in scripts)
+  switch, sw <branch>   Alias for 'path'
+  config                Manage configuration
+  lock <branch>         Lock a worktree
+  unlock <branch>       Unlock a worktree
+  setup                 Setup shell integration (completions, functions)
+  help [command]        Show help
 
 Options:
   --json            Output as JSON (works with all commands)
-  --all             Show status for all worktrees including clean ones
+  --all             Prune: remove all prunable worktrees | Status: show all worktrees
+  --group <name>    Filter by namespace/group (works with list, status, sync)
   --dry-run         Show what would be done without doing it
   --version         Show version
   --help, -h        Show this help
 
+Namespace/Group Support:
+  Worktrees can be organized into namespaces automatically from branch names:
+    forest add feature/auth -b        # Creates in feature/ namespace
+    forest add auth --group feature   # Explicitly set group
+    forest list --group feature       # List only feature/* worktrees
+    forest groups                     # List all namespaces with counts
+
 Examples:
-  forest add feature-x              # Creates at ~/.forest/worktrees/repo/feature-x/
-  forest add feature-x -b           # Create new branch and worktree
-  forest add feature-x -b --from main  # Create branch from 'main'
-  forest add feature-x main         # Create worktree on existing 'main' branch
-  forest add ./custom/path feature  # Create at explicit path
-  forest clone feature-x feature-y -b  # Clone feature-x's commit to new branch feature-y
-  forest remove feature-x
-  forest status                     # Show status of all worktrees
-  forest sync                       # Pull updates on all clean worktrees
-  forest sync --force               # Pull even if worktrees have changes (stashes first)
-  forest path feature-x              # Get path for shell integration
-  cd $(forest path feature-x)
+  forest add feature/auth -b            # Auto-namespace from branch name
+  forest add feature-x -b --from main   # Create branch from 'main'
+  forest ls --group feature             # List worktrees in feature/ namespace
+  forest st --group bugfix              # Show status for bugfix/ namespace
+  forest groups                         # List all namespaces
+  forest sync --group feature           # Sync only feature/ worktrees
+  forest prune --all                    # Prune stale and remove prunable worktrees
+  forest clone feature-x feature-y -b   # Clone feature-x's commit to new branch
+  forest rm feature-x                   # Remove worktree (short alias)
   forest config set directory ~/.my-worktrees
   forest lock feature-x --reason "WIP: debugging"
-  forest list --json
-  forest setup                      # Install shell completions
 
 For AI agents: All commands support --json flag for structured output.
 Exit codes: 0=success, 1=error, 2=validation error
@@ -1794,15 +1946,18 @@ async function main(): Promise<void> {
   try {
     switch (parsed.command) {
       case "list":
+      case "ls":
         result = await cmdList(parsed.flags);
         break;
       case "add":
+      case "mk":
         result = await cmdAdd(parsed.args, parsed.flags);
         break;
       case "clone":
         result = await cmdClone(parsed.args, parsed.flags);
         break;
       case "remove":
+      case "rm":
         result = await cmdRemove(parsed.args, parsed.flags);
         break;
       case "prune":
@@ -1815,7 +1970,11 @@ async function main(): Promise<void> {
         result = await cmdInfo(parsed.args, parsed.flags);
         break;
       case "status":
+      case "st":
         result = await cmdStatus(parsed.flags);
+        break;
+      case "groups":
+        result = await cmdGroups(parsed.flags);
         break;
       case "config":
         result = await cmdConfig(parsed.args, parsed.flags);
@@ -1824,6 +1983,7 @@ async function main(): Promise<void> {
         result = await cmdPath(parsed.args, parsed.flags);
         break;
       case "switch":
+      case "sw":
         result = await cmdPath(parsed.args, parsed.flags);
         break;
       case "lock":
