@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-const VERSION = "0.7.0";
+const VERSION = "0.7.1";
 
 // Color utilities with NO_COLOR support
 function getColors() {
@@ -302,6 +302,16 @@ async function resolveWorktreePath(branchOrPath: string): Promise<string> {
   return await getWorktreePath(branchOrPath);
 }
 
+function expandPath(path: string): string {
+  if (path.startsWith("~")) {
+    return `${Bun.env.HOME}${path.slice(1)}`;
+  }
+  if (path.startsWith(".")) {
+    return path; // Keep relative paths as-is, will be resolved by git
+  }
+  return path;
+}
+
 function validatePath(path: string): { valid: boolean; error?: string } {
   if (!path || path.trim().length === 0) {
     return { valid: false, error: "Path cannot be empty" };
@@ -334,7 +344,7 @@ function parseArgs(): ParsedArgs {
   const positionalArgs: string[] = [];
   
   // Flags that accept space-separated values
-  const valueFlags = new Set(["shell", "reason", "from"]);
+  const valueFlags = new Set(["shell", "reason", "from", "group"]);
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -406,7 +416,7 @@ async function getWorktrees(): Promise<Worktree[]> {
         const part = parts[j];
         if (!part) continue;
         
-        if (part === "locked") {
+        if (part.startsWith("locked")) {
           locked = true;
         } else if (part === "prunable") {
           prunable = true;
@@ -450,7 +460,7 @@ async function getWorktrees(): Promise<Worktree[]> {
         }
         
         // Parse locked/prunable attributes that may appear on separate lines
-        if (nextLine === "locked") {
+        if (nextLine.startsWith("locked")) {
           locked = true;
         }
         if (nextLine === "prunable") {
@@ -657,7 +667,7 @@ async function cmdAdd(args: string[], flags: Record<string, boolean | string>): 
         },
       };
     }
-    path = first;
+    path = expandPath(first);
     branch = second;
   } else {
     // Otherwise treat as branch name, generate path from central directory
@@ -752,7 +762,9 @@ async function cmdClone(args: string[], flags: Record<string, boolean | string>)
   }
 
   const newBranchFlag = flags["new-branch"];
-  const targetPath = newBranch.includes("/") ? newBranch : await getWorktreePath(newBranch);
+  const targetPath = newBranch.startsWith("/") || newBranch.startsWith("~") || newBranch.startsWith(".") 
+    ? expandPath(newBranch) 
+    : await getWorktreePath(newBranch);
 
   const pathValidation = validatePath(targetPath);
   if (!pathValidation.valid) {
@@ -859,7 +871,8 @@ async function cmdRemove(args: string[], flags: Record<string, boolean | string>
     };
   }
 
-  const path = await resolveWorktreePath(branchOrPath);
+  const expanded = branchOrPath.startsWith("~") || branchOrPath.startsWith(".") ? expandPath(branchOrPath) : branchOrPath;
+  const path = await resolveWorktreePath(expanded);
 
   const pathValidation = validatePath(path);
   if (!pathValidation.valid) {
@@ -900,7 +913,13 @@ async function cmdRemove(args: string[], flags: Record<string, boolean | string>
       }
     }
 
-    await Bun.$`git worktree remove ${[path]}${force ? " --force" : ""}`.quiet();
+    let cmd;
+    if (force) {
+      cmd = Bun.$`git worktree remove ${[path]} --force`;
+    } else {
+      cmd = Bun.$`git worktree remove ${[path]}`;
+    }
+    await cmd.quiet();
 
     const result = {
       success: true,
@@ -936,8 +955,12 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
     const all = flags.all;
     spinner.start("Pruning worktrees...");
 
-    const cmd = dryRun ? `git worktree prune --dry-run` : `git worktree prune`;
-    const result = await Bun.$`${cmd}`.quiet().text();
+    let result: string;
+    if (dryRun) {
+      result = await Bun.$`git worktree prune --dry-run`.quiet().text();
+    } else {
+      result = await Bun.$`git worktree prune`.quiet().text();
+    }
 
     const pruned = result
       .split("\n")
@@ -1068,12 +1091,12 @@ async function cmdSync(flags: Record<string, boolean | string>): Promise<Command
             error: "pull failed",
           });
         }
-      } catch (error) {
-        results.failed.push({
-          path: wt.path,
-          error: "unexpected error",
-        });
-      }
+} catch (error) {
+          results.failed.push({
+            path: wt.path,
+            error: "pull failed",
+          });
+        }
     }
 
     spinner.stop();
@@ -1297,7 +1320,7 @@ async function cmdConfig(args: string[], flags: Record<string, boolean | string>
       }
       return result;
     } else if (action === "set") {
-      if (!value) {
+      if (value === undefined || value === "") {
         return {
           success: false,
           error: {
@@ -1494,7 +1517,20 @@ async function cmdInfo(args: string[], flags: Record<string, boolean | string>):
 
   try {
     const worktrees = await getWorktrees();
-    const worktree = worktrees.find((w) => w.path === path);
+    // Expand ~ and . in paths before normalizing
+    const expandedPath = expandPath(path);
+    // Normalize paths for comparison (handles macOS /var -> /private symlinks)
+    const normalizedPath = (await Bun.$`realpath ${[expandedPath]}`.quiet().text()).trim();
+    
+    // Normalize all worktree paths
+    const normalizedWorktrees = await Promise.all(
+      worktrees.map(async (w) => ({
+        ...w,
+        normalizedPath: (await Bun.$`realpath ${[w.path]}`.quiet().text()).trim(),
+      }))
+    );
+    
+    const worktree = normalizedWorktrees.find((w) => w.normalizedPath === normalizedPath);
 
     if (!worktree) {
       return {
@@ -2059,7 +2095,7 @@ async function main(): Promise<void> {
         }
         process.exit(2);
     }
-  } catch (error) {
+} catch (error) {
     const errorResult: CommandResult = {
       success: false,
       error: { code: "INTERNAL_ERROR", message: "An unexpected error occurred", suggestion: "Check your git repository and try again" },
@@ -2070,6 +2106,12 @@ async function main(): Promise<void> {
   if (result) {
     if (isJsonOutput) {
       console.log(JSON.stringify(result));
+    } else if (!result.success && result.error) {
+      const colors = getColors();
+      console.log(colors.error(`Error: ${result.error.message}`));
+      if (result.error.suggestion) {
+        console.log(colors.dim(`Suggestion: ${result.error.suggestion}`));
+      }
     }
     process.exit(result.success ? 0 : 1);
   }

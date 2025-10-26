@@ -69,7 +69,10 @@ test("validation - protect system directories (/etc)", async () => {
 
 test("validation - allow valid user paths", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} add ~/my-worktrees/feature-valid -b --json`.cwd(testRepo.path).text();
+  const worktreeDir = `${testRepo.path}/.worktrees/feature-valid`;
+  await Bun.$`mkdir -p ${[worktreeDir.substring(0, worktreeDir.lastIndexOf("/"))]}`.quiet();
+  await Bun.$`git -C ${[testRepo.path]} branch feature-valid`.quiet();
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} add ${[worktreeDir]} feature-valid --json`.cwd(testRepo.path).text();
   const data = parseJSONOutput(result);
   expect(data.success).toBe(true);
 });
