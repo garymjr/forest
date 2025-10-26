@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 interface Worktree {
   path: string;
@@ -8,6 +8,17 @@ interface Worktree {
   commit: string;
   locked: boolean;
   prunable: boolean;
+}
+
+interface WorktreeStatus extends Worktree {
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  conflicts: boolean;
+  hasUpstream: boolean;
+  stagedFiles: number;
+  unstagedFiles: number;
+  untrackedFiles: number;
 }
 
 interface CommandResult {
@@ -208,8 +219,8 @@ function parseArgs(): ParsedArgs {
       const eqIndex = key.indexOf("=");
       if (eqIndex > -1) {
         flags[key.slice(0, eqIndex)] = key.slice(eqIndex + 1);
-      } else if (valueFlags.has(key) && i + 1 < args.length && !args[i + 1].startsWith("-")) {
-        flags[key] = args[++i];
+      } else if (valueFlags.has(key) && i + 1 < args.length && !args[i + 1]?.startsWith("-")) {
+        flags[key] = args[++i] ?? "";
       } else {
         flags[key] = true;
       }
@@ -290,6 +301,70 @@ async function getWorktrees(): Promise<Worktree[]> {
   } catch (error) {
     return [];
   }
+}
+
+async function getWorktreeStatus(worktree: Worktree): Promise<WorktreeStatus> {
+  const status: WorktreeStatus = {
+    ...worktree,
+    dirty: false,
+    ahead: 0,
+    behind: 0,
+    conflicts: false,
+    hasUpstream: false,
+    stagedFiles: 0,
+    unstagedFiles: 0,
+    untrackedFiles: 0,
+  };
+
+  try {
+    // Get git status
+    const statusOutput = await Bun.$`git -C ${[worktree.path]} status --porcelain`.quiet().text();
+    const statusLines = statusOutput.trim().split("\n").filter(Boolean);
+
+    if (statusLines.length > 0) {
+      status.dirty = true;
+      for (const line of statusLines) {
+        const stageStatus = line[0];
+        const workStatus = line[1];
+        
+        if (stageStatus !== " " && stageStatus !== "?") {
+          status.stagedFiles++;
+        }
+        if (workStatus !== " " && workStatus !== "?") {
+          status.unstagedFiles++;
+        }
+        if (stageStatus === "?" && workStatus === "?") {
+          status.untrackedFiles++;
+        }
+        if (stageStatus === "U" || workStatus === "U" || stageStatus === "D" || workStatus === "D") {
+          status.conflicts = true;
+        }
+      }
+    }
+
+    // Check for upstream and ahead/behind
+    try {
+      const upstreamCheck = await Bun.$`git -C ${[worktree.path]} rev-parse --abbrev-ref @{upstream}`.quiet().text();
+      if (upstreamCheck.trim()) {
+        status.hasUpstream = true;
+        
+        try {
+          const aheadBehind = await Bun.$`git -C ${[worktree.path]} rev-list --left-right --count @{upstream}...HEAD`.quiet().text();
+          const parts = aheadBehind.trim().split("\t");
+          status.behind = parseInt(parts[0] || "0") || 0;
+          status.ahead = parseInt(parts[1] || "0") || 0;
+        } catch (error) {
+          // Ignore errors from rev-list
+        }
+      }
+    } catch (error) {
+      // No upstream configured
+    }
+  } catch (error) {
+    // Silently fail - worktree might not exist or git command failed
+  }
+
+  return status;
 }
 
 async function cmdList(flags: Record<string, boolean | string>): Promise<CommandResult> {
@@ -515,6 +590,87 @@ async function cmdPrune(flags: Record<string, boolean | string>): Promise<Comman
       error: {
         code: "PRUNE_ERROR",
         message: "Failed to prune worktrees",
+        suggestion: "Ensure you are in a git repository",
+      },
+    };
+  }
+}
+
+async function cmdStatus(flags: Record<string, boolean | string>): Promise<CommandResult> {
+  try {
+    const worktrees = await getWorktrees();
+    const all = flags.all;
+    
+    const statuses = await Promise.all(worktrees.map((wt) => getWorktreeStatus(wt)));
+    
+    const summary = {
+      total: statuses.length,
+      clean: statuses.filter((s) => !s.dirty && !s.conflicts).length,
+      dirty: statuses.filter((s) => s.dirty && !s.conflicts).length,
+      conflicts: statuses.filter((s) => s.conflicts).length,
+      locked: statuses.filter((s) => s.locked).length,
+    };
+
+    const response = {
+      success: true,
+      data: { worktrees: statuses, summary },
+    };
+
+    if (!flags.json) {
+      console.log("Git Worktrees Status:");
+      console.log("─".repeat(80));
+      
+      for (const status of statuses) {
+        let icon = "✓";
+        if (status.conflicts) {
+          icon = "✗";
+        } else if (status.dirty) {
+          icon = "⚠";
+        }
+        
+        const lockStr = status.locked ? " [LOCKED]" : "";
+        console.log(`${icon} ${status.path}${lockStr}`);
+        console.log(`  Branch: ${status.branch} (${status.commit})`);
+        
+        const trackingStr = [];
+        if (status.hasUpstream) {
+          if (status.behind > 0) trackingStr.push(`↓${status.behind}`);
+          if (status.ahead > 0) trackingStr.push(`↑${status.ahead}`);
+          if (trackingStr.length === 0) trackingStr.push("✓ up-to-date");
+        } else {
+          trackingStr.push("✗ no upstream");
+        }
+        
+        if (status.dirty || status.conflicts) {
+          let statusStr = "";
+          if (status.conflicts) {
+            statusStr = `CONFLICTS (${status.stagedFiles + status.unstagedFiles} files)`;
+          } else {
+            const parts = [];
+            if (status.stagedFiles > 0) parts.push(`${status.stagedFiles} staged`);
+            if (status.unstagedFiles > 0) parts.push(`${status.unstagedFiles} unstaged`);
+            if (status.untrackedFiles > 0) parts.push(`${status.untrackedFiles} untracked`);
+            statusStr = `DIRTY (${parts.join(", ")})`;
+          }
+          console.log(`  Status: ${trackingStr.join(" ")} | ${statusStr}`);
+        } else if (all) {
+          console.log(`  Status: ${trackingStr.join(" ")} | clean`);
+        }
+      }
+      
+      console.log("─".repeat(80));
+      console.log(
+        `Summary: ${summary.total} worktrees (${summary.clean} clean, ${summary.dirty} dirty, ${summary.conflicts} conflicts${summary.locked > 0 ? `, ${summary.locked} locked` : ""})`
+      );
+    }
+
+    return response;
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: "STATUS_ERROR",
+        message: "Failed to get worktree status",
         suggestion: "Ensure you are in a git repository",
       },
     };
@@ -962,6 +1118,7 @@ Commands:
   remove <branch>   Remove a worktree (or remove <path> for explicit path)
   prune             Prune stale worktrees
   info <path>       Show worktree details
+  status            Show comprehensive status of all worktrees
   path <branch>     Get path to worktree (useful in scripts)
   switch <branch>   Alias for 'path'
   config            Manage configuration
@@ -972,6 +1129,7 @@ Commands:
 
 Options:
   --json            Output as JSON (works with all commands)
+  --all             Show status for all worktrees including clean ones
   --dry-run         Show what would be done without doing it
   --version         Show version
   --help, -h        Show this help
@@ -981,6 +1139,7 @@ Examples:
   forest add feature-x main         # Create worktree on 'main' branch
   forest add ./custom/path feature  # Create at explicit path
   forest remove feature-x
+  forest status                     # Show status of all worktrees
   forest path feature-x              # Get path for shell integration
   cd $(forest path feature-x)
   forest config set directory ~/.my-worktrees
@@ -1043,6 +1202,34 @@ Arguments:
 
 Options:
   --json    Output as JSON`,
+
+      status: `forest status [--all] [--json]
+
+Show comprehensive git status for all worktrees, including:
+  - Dirty/clean state (uncommitted changes)
+  - Ahead/behind tracking (relative to upstream)
+  - Untracked files
+  - Merge conflicts
+
+Status indicators:
+  ✓ Clean worktree (no changes)
+  ⚠ Dirty worktree (has uncommitted changes)
+  ✗ Conflicts (merge conflicts present)
+  [LOCKED] Worktree is locked
+
+Tracking indicators:
+  ↓N  Behind N commits from upstream
+  ↑N  Ahead N commits from upstream
+  ✗   No upstream configured
+
+Options:
+  --all    Show full status for all worktrees including clean ones
+  --json   Output as JSON
+
+Examples:
+  forest status              # Show summary with problem worktrees
+  forest status --all        # Show all worktrees with status
+  forest status --json       # Get structured JSON output`,
 
       path: `forest path <branch|path> [--json]
 
@@ -1158,6 +1345,9 @@ async function main(): Promise<void> {
         break;
       case "info":
         result = await cmdInfo(parsed.args, parsed.flags);
+        break;
+      case "status":
+        result = await cmdStatus(parsed.flags);
         break;
       case "config":
         result = await cmdConfig(parsed.args, parsed.flags);
