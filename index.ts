@@ -29,6 +29,10 @@ interface Config {
 const CONFIG_DIR = `${Bun.env.HOME}/.config/forest`;
 const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
 const DEFAULT_WORKTREE_DIR = `${Bun.env.HOME}/.forest/worktrees`;
+const SHELL_SHARE_DIR = `${Bun.env.HOME}/.local/share/forest`;
+const COMPLETION_DIR = `${Bun.env.HOME}/.local/share/bash-completion/completions`;
+const ZSH_COMPLETION_DIR = `${Bun.env.HOME}/.local/share/zsh/site-functions`;
+const FISH_COMPLETION_DIR = `${Bun.env.HOME}/.config/fish/completions`;
 const SENSITIVE_PATHS = ["/", "/etc", "/usr", "/var", "/sys", "/proc", "/boot", "/dev", "/lib", "/sbin", "/bin"];
 
 function isValidConfigPath(path: string): { valid: boolean; error?: string } {
@@ -191,6 +195,9 @@ function parseArgs(): ParsedArgs {
   const args = process.argv.slice(2);
   const flags: Record<string, boolean | string> = {};
   const positionalArgs: string[] = [];
+  
+  // Flags that accept space-separated values
+  const valueFlags = new Set(["shell", "reason"]);
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -201,6 +208,8 @@ function parseArgs(): ParsedArgs {
       const eqIndex = key.indexOf("=");
       if (eqIndex > -1) {
         flags[key.slice(0, eqIndex)] = key.slice(eqIndex + 1);
+      } else if (valueFlags.has(key) && i + 1 < args.length && !args[i + 1].startsWith("-")) {
+        flags[key] = args[++i];
       } else {
         flags[key] = true;
       }
@@ -815,6 +824,132 @@ async function cmdInfo(args: string[], flags: Record<string, boolean | string>):
   }
 }
 
+function detectShell(): string {
+  const shell = Bun.env.SHELL || "";
+  if (shell.includes("zsh")) return "zsh";
+  if (shell.includes("fish")) return "fish";
+  return "bash";
+}
+
+async function copyCompletionFiles(targetShell: string): Promise<{ files: string[] }> {
+  const files: string[] = [];
+  const sourceDir = import.meta.dir;
+
+  try {
+    if (targetShell === "bash" || targetShell === "all") {
+      const bashSource = `${sourceDir}/completions/forest.bash`;
+      const bashDest = `${COMPLETION_DIR}/forest`;
+      await Bun.$`mkdir -p ${[COMPLETION_DIR]}`.quiet();
+      await Bun.$`cp ${[bashSource]} ${[bashDest]}`.quiet();
+      files.push(bashDest);
+    }
+
+    if (targetShell === "zsh" || targetShell === "all") {
+      const zshSource = `${sourceDir}/completions/forest.zsh`;
+      const zshDest = `${ZSH_COMPLETION_DIR}/_forest`;
+      await Bun.$`mkdir -p ${[ZSH_COMPLETION_DIR]}`.quiet();
+      await Bun.$`cp ${[zshSource]} ${[zshDest]}`.quiet();
+      files.push(zshDest);
+    }
+
+    if (targetShell === "fish" || targetShell === "all") {
+      const fishSource = `${sourceDir}/completions/forest.fish`;
+      const fishDest = `${FISH_COMPLETION_DIR}/forest.fish`;
+      await Bun.$`mkdir -p ${[FISH_COMPLETION_DIR]}`.quiet();
+      await Bun.$`cp ${[fishSource]} ${[fishDest]}`.quiet();
+      files.push(fishDest);
+    }
+  } catch (error) {
+    throw new Error("Failed to copy completion files");
+  }
+
+  return { files };
+}
+
+async function copyFunctionsFile(): Promise<string> {
+  const sourceDir = import.meta.dir;
+  const functionsSource = `${sourceDir}/functions.sh`;
+  const functionsDest = `${SHELL_SHARE_DIR}/functions.sh`;
+
+  try {
+    await Bun.$`mkdir -p ${[SHELL_SHARE_DIR]}`.quiet();
+    await Bun.$`cp ${[functionsSource]} ${[functionsDest]}`.quiet();
+    return functionsDest;
+  } catch (error) {
+    throw new Error("Failed to copy functions file");
+  }
+}
+
+async function cmdSetup(flags: Record<string, boolean | string>): Promise<CommandResult> {
+  let targetShell = (flags.shell as string) || detectShell();
+
+  const validShells = ["bash", "zsh", "fish", "all"];
+  if (!validShells.includes(targetShell)) {
+    return {
+      success: false,
+      error: {
+        code: "INVALID_SHELL",
+        message: `Invalid shell: ${targetShell}`,
+        suggestion: `Valid shells: ${validShells.join(", ")}`,
+      },
+    };
+  }
+
+  try {
+    const completionResult = await copyCompletionFiles(targetShell);
+    const functionsPath = await copyFunctionsFile();
+
+    const profileHint = targetShell === "bash" ? "~/.bashrc" : targetShell === "zsh" ? "~/.zshrc" : "~/.config/fish/config.fish";
+    const sourceCmd = targetShell === "fish" ? `source ${functionsPath}` : `source ${functionsPath}`;
+
+    const result = {
+      success: true,
+      data: {
+        message: "Shell integration installed successfully",
+        shell: targetShell,
+        completions: completionResult.files,
+        functions: functionsPath,
+        setup_instructions: `Add to your ${profileHint}:\n\n  ${sourceCmd}`,
+      },
+    };
+
+    if (!flags.json) {
+      console.log("✓ Shell integration installed successfully!\n");
+      console.log("Completions installed:");
+      completionResult.files.forEach((f) => console.log(`  - ${f}`));
+      console.log(`\nHelper functions installed: ${functionsPath}\n`);
+
+      console.log("Helper functions available:");
+      console.log("  fcd <branch>       - Change to worktree directory");
+      console.log("  fadd <branch>      - Create worktree and cd into it");
+      console.log("  fls                - List all worktrees");
+      console.log("  frm                - Remove current worktree and return to main repo\n");
+
+      console.log(`To enable these, add to your ${profileHint}:\n`);
+      console.log(`  source ${functionsPath}\n`);
+
+      if (targetShell === "bash") {
+        console.log("Then restart your shell or run: source ~/.bashrc");
+      } else if (targetShell === "zsh") {
+        console.log("Then restart your shell or run: source ~/.zshrc");
+      } else if (targetShell === "fish") {
+        console.log("Then restart your shell or run: source ~/.config/fish/config.fish");
+      }
+    }
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: "SETUP_ERROR",
+        message: "Failed to setup shell integration",
+        suggestion: "Check that completion files exist and target directories are writable",
+      },
+    };
+  }
+}
+
 function showHelp(command?: string): void {
   if (!command) {
     console.log(`forest v${VERSION} - Git worktree manager
@@ -832,6 +967,7 @@ Commands:
   config            Manage configuration
   lock <branch>     Lock a worktree
   unlock <branch>   Unlock a worktree
+  setup             Setup shell integration (completions, functions)
   help [command]    Show help
 
 Options:
@@ -850,6 +986,7 @@ Examples:
   forest config set directory ~/.my-worktrees
   forest lock feature-x --reason "WIP: debugging"
   forest list --json
+  forest setup                      # Install shell completions
 
 For AI agents: All commands support --json flag for structured output.
 Exit codes: 0=success, 1=error, 2=validation error
@@ -963,6 +1100,25 @@ Arguments:
 Options:
   --force    Force unlock even if locked with a reason
   --json     Output as JSON`,
+
+      setup: `forest setup [--shell bash|zsh|fish|all] [--json]
+
+Setup shell integration including completions and helper functions.
+
+Shell helper functions available:
+  fcd <branch>       - Change to worktree directory
+  fadd <branch>      - Create worktree and cd into it
+  fls                - List all worktrees
+  frm                - Remove current worktree and return to main repo
+
+Options:
+  --shell <shell>    Target shell (bash, zsh, fish, all; default: detect current)
+  --json             Output as JSON
+
+Examples:
+  forest setup              # Auto-detect shell and setup
+  forest setup --shell zsh  # Setup for zsh only
+  forest setup --shell all  # Setup for all supported shells`,
     };
 
     console.log(help[command] || `Unknown command: ${command}`);
@@ -1017,6 +1173,9 @@ async function main(): Promise<void> {
         break;
       case "unlock":
         result = await cmdUnlock(parsed.args, parsed.flags);
+        break;
+      case "setup":
+        result = await cmdSetup(parsed.flags);
         break;
       case "help":
         showHelp(parsed.args[0]);
