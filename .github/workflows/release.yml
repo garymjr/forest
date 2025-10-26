@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  actions: read
+  id-token: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            output: forest-linux-x64
+          - os: macos-latest
+            target: bun-darwin-arm64
+            output: forest-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+      - run: bun install
+      - run: bun build ./index.ts --compile --target=${{ matrix.target }} --outfile ${{ matrix.output }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+      - run: |
+          mkdir -p release-artifacts
+          mv forest-linux-x64/forest-linux-x64 release-artifacts/forest-linux-x64
+          mv forest-macos-arm64/forest-macos-arm64 release-artifacts/forest-macos-arm64
+          chmod +x release-artifacts/*
+          ls -la release-artifacts/
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: release-artifacts/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

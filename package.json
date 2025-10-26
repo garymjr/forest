@@ -1,8 +1,19 @@
 {
   "name": "forest",
+  "version": "0.1.0",
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "bin": {
+    "forest": "index.ts"
+  },
+  "scripts": {
+    "build": "bun build ./index.ts --compile --outfile forest",
+    "build:linux": "bun build ./index.ts --compile --target=bun-linux-x64 --outfile forest-linux",
+    "build:macos": "bun build ./index.ts --compile --target=bun-darwin-arm64 --outfile forest-macos-arm64",
+    "dev": "bun ./index.ts",
+    "test": "bun test"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
