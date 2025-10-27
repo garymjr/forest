@@ -3,6 +3,7 @@ import {
   createTempTestRepo,
   parseJSONOutput,
   resetForestConfig,
+  stripAnsiCodes,
   type TestRepo,
 } from "./test-utils";
 
@@ -79,14 +80,16 @@ test("validation - allow valid user paths", async () => {
 
 test("validation - config rejects invalid directory", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory "/etc/shadow"`.cwd(testRepo.path).text();
-  expect(result.includes("error") || result.includes("sensitive")).toBe(true);
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory "/etc/shadow"`.cwd(testRepo.path).text().catch(e => e.stdout?.toString() || "");
+  const cleaned = stripAnsiCodes(result);
+  expect(cleaned.includes("error") || cleaned.includes("sensitive")).toBe(true);
 });
 
 test("validation - config rejects path traversal", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory "~/foo/../../etc"`.cwd(testRepo.path).text();
-  expect(result.includes("traversal") || result.includes("error")).toBe(true);
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory "~/foo/../../etc"`.cwd(testRepo.path).text().catch(e => e.stdout?.toString() || "");
+  const cleaned = stripAnsiCodes(result);
+  expect(cleaned.includes("traversal") || cleaned.includes("error")).toBe(true);
 });
 
 test("validation - config accepts valid home directory path", async () => {

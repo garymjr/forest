@@ -3,6 +3,7 @@ import {
   createTempTestRepo,
   parseJSONOutput,
   resetForestConfig,
+  stripAnsiCodes,
   type TestRepo,
 } from "./test-utils";
 import { rmSync } from "fs";
@@ -27,7 +28,8 @@ afterEach(async () => {
 test("config - get default directory", async () => {
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get directory`.cwd(testRepo.path).text();
-  expect(result).toContain(".forest/worktrees");
+  const cleaned = stripAnsiCodes(result);
+  expect(cleaned).toContain(".forest/worktrees");
 });
 
 test("config - set custom directory", async () => {
@@ -68,20 +70,23 @@ test("config - reset to defaults", async () => {
 
 test("config - reject unknown config key", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get unknown-key`.cwd(testRepo.path).text();
-  expect(result.includes("Unknown") || result.includes("error")).toBe(true);
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get unknown-key`.cwd(testRepo.path).text().catch(e => e.stdout?.toString() || "");
+  const cleaned = stripAnsiCodes(result);
+  expect(cleaned.includes("Unknown") || cleaned.includes("error")).toBe(true);
 });
 
 test("config - set requires value", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory`.cwd(testRepo.path).text();
-  expect(result.includes("required") || result.includes("error")).toBe(true);
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory`.cwd(testRepo.path).text().catch(e => e.stdout?.toString() || "");
+  const cleaned = stripAnsiCodes(result);
+  expect(cleaned.includes("required") || cleaned.includes("error")).toBe(true);
 });
 
 test("config - reject invalid set action", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config invalid directory value`.cwd(testRepo.path).text();
-  expect(result.includes("Unknown") || result.includes("Invalid")).toBe(true);
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config invalid directory value`.cwd(testRepo.path).text().catch(e => e.stdout?.toString() || "");
+  const cleaned = stripAnsiCodes(result);
+  expect(cleaned.includes("Unknown") || cleaned.includes("Invalid")).toBe(true);
 });
 
 test("config - JSON output includes key and value", async () => {
@@ -104,8 +109,9 @@ test("config - supports tilde expansion", async () => {
 
 test("config - empty path rejected", async () => {
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ""`.cwd(testRepo.path).text();
-  expect(result.includes("error") || result.includes("cannot be empty")).toBe(true);
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config set directory ""`.cwd(testRepo.path).text().catch(e => e.stdout?.toString() || "");
+  const cleaned = stripAnsiCodes(result);
+  expect(cleaned.includes("error") || cleaned.includes("required") || cleaned.includes("cannot be empty")).toBe(true);
 });
 
 test("config - validate on load from disk", async () => {

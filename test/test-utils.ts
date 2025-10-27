@@ -117,6 +117,10 @@ export function parseJSONOutput(output: string): any {
   }
 }
 
+export function stripAnsiCodes(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 export async function runForestCommand(
   args: string[],
   options: { cwd?: string; json?: boolean } = {}

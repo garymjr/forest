@@ -6,6 +6,7 @@ import {
   getWorktreePath,
   parseJSONOutput,
   resetForestConfig,
+  stripAnsiCodes,
   type TestRepo,
 } from "./test-utils";
 
@@ -81,8 +82,9 @@ test("remove - reject dirty worktree without --force", async () => {
   const wtPath = await createTestWorktree(testRepo.path, "feature-dirty", true);
   await Bun.write(`${wtPath}/test.txt`, "changes");
   const forestDir = import.meta.dir;
-  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} remove feature-dirty`.cwd(testRepo.path).text();
-  expect(result.includes("uncommitted changes") || result.includes("error")).toBe(true);
+  const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} remove feature-dirty`.cwd(testRepo.path).text().catch(e => e.stdout?.toString() || "");
+  const cleaned = stripAnsiCodes(result);
+  expect(cleaned.includes("uncommitted changes") || cleaned.includes("error")).toBe(true);
 });
 
 test("remove - force remove dirty worktree", async () => {
