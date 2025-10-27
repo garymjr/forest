@@ -26,6 +26,8 @@ afterEach(async () => {
 });
 
 test("config - get default directory", async () => {
+  // Reset config to get the true default
+  await resetForestConfig();
   const forestDir = import.meta.dir;
   const result = await Bun.$`bun ${[`${forestDir}/../index.ts`]} config get directory`.cwd(testRepo.path).text();
   const cleaned = stripAnsiCodes(result);
